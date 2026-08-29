@@ -2244,6 +2244,56 @@ class TestMatrixOnRoomMessageFilter:
         await self.adapter._on_room_message(ev)
         self.adapter._handle_text_message.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_unauthorized_dm_is_dropped(self):
+        self.adapter._allowed_room_ids = {"!allowed:example.org"}
+        self.adapter._dm_rooms = {"!dm:example.org": True}
+        ev = self._mk_event(
+            sender="@alice:example.org",
+            room_id="!dm:example.org",
+        )
+
+        await self.adapter._on_room_message(ev)
+
+        self.adapter._handle_text_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicitly_allowed_dm_reaches_handler(self):
+        self.adapter._allowed_room_ids = {"!dm:example.org"}
+        self.adapter._dm_rooms = {"!dm:example.org": True}
+        ev = self._mk_event(
+            sender="@alice:example.org",
+            room_id="!dm:example.org",
+        )
+
+        await self.adapter._on_room_message(ev)
+
+        self.adapter._handle_text_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_allowed_room_reaches_handler(self):
+        self.adapter._allowed_room_ids = {"!allowed:example.org"}
+        ev = self._mk_event(
+            sender="@alice:example.org",
+            room_id="!allowed:example.org",
+        )
+
+        await self.adapter._on_room_message(ev)
+
+        self.adapter._handle_text_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unset_room_allowlist_preserves_existing_behavior(self):
+        self.adapter._allowed_room_ids = set()
+        ev = self._mk_event(
+            sender="@alice:example.org",
+            room_id="!any:example.org",
+        )
+
+        await self.adapter._on_room_message(ev)
+
+        self.adapter._handle_text_message.assert_awaited_once()
+
 
     @pytest.mark.asyncio
     async def test_notice_message_can_be_enabled(self):
@@ -2255,6 +2305,54 @@ class TestMatrixOnRoomMessageFilter:
         )
         await self.adapter._on_room_message(ev)
         self.adapter._handle_text_message.assert_awaited_once()
+
+
+class TestMatrixOutboundRoomBoundary:
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._allowed_room_ids = {"!allowed:example.org"}
+        self.adapter._client = MagicMock()
+        self.adapter._client.send_message_event = AsyncMock(return_value="$sent")
+        self.adapter._client.upload_media = AsyncMock(return_value="mxc://example.org/media")
+
+    @pytest.mark.asyncio
+    async def test_text_outside_allowlist_is_rejected(self):
+        result = await self.adapter.send("!other:example.org", "blocked")
+
+        assert result.success is False
+        assert result.error == "Matrix room is not allowed"
+        self.adapter._client.send_message_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_media_outside_allowlist_is_rejected_before_upload(self):
+        result = await self.adapter._upload_and_send(
+            "!other:example.org",
+            b"private image",
+            "image.png",
+            "image/png",
+            "m.image",
+        )
+
+        assert result.success is False
+        assert result.error == "Matrix room is not allowed"
+        self.adapter._client.upload_media.assert_not_awaited()
+        self.adapter._client.send_message_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_status_reaction_outside_allowlist_is_rejected(self):
+        result = await self.adapter._send_reaction(
+            "!other:example.org", "$event", "\U0001f440"
+        )
+
+        assert result is None
+        self.adapter._client.send_message_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_text_to_exact_allowlisted_room_still_works(self):
+        result = await self.adapter.send("!allowed:example.org", "allowed")
+
+        assert result.success is True
+        self.adapter._client.send_message_event.assert_awaited_once()
 
 
 class TestMatrixRequireMention:

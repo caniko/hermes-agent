@@ -100,6 +100,33 @@ class TestOnInviteRecordsDM:
         adapter._join_room_by_id.assert_awaited_once()
         adapter._record_dm_room.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_direct", [True, False])
+    async def test_unauthorized_room_invite_is_not_joined(self, is_direct):
+        adapter = _make_adapter()
+        adapter._allowed_room_ids = {"!allowed:example.org"}
+        adapter._join_room_by_id = AsyncMock(return_value=True)
+        event = _make_invite_event(
+            room_id="!other:example.org",
+            is_direct=is_direct,
+        )
+
+        await adapter._on_invite(event)
+
+        assert adapter._invite_join_tasks == {}
+        adapter._join_room_by_id.assert_not_awaited()
+
+    def test_pending_unauthorized_invite_is_not_scheduled(self):
+        adapter = _make_adapter()
+        adapter._allowed_room_ids = {"!allowed:example.org"}
+        adapter._schedule_invite_join = MagicMock()
+
+        adapter._schedule_pending_invite_joins(
+            {"rooms": {"invite": {"!other:example.org": {}}}}
+        )
+
+        adapter._schedule_invite_join.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # _record_dm_room
@@ -138,5 +165,4 @@ class TestRecordDMRoom:
 
         adapter._client.set_account_data.assert_not_awaited()
         assert adapter._dm_rooms.get("!room:example.org") is True
-
 

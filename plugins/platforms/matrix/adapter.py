@@ -15,16 +15,13 @@ Environment variables:
     MATRIX_DEVICE_ID            Stable device ID for E2EE persistence across restarts
     MATRIX_PROXY                HTTP(S) or SOCKS proxy URL for Matrix traffic
     MATRIX_ALLOWED_USERS    Comma-separated Matrix user IDs (@user:server)
-    MATRIX_ALLOWED_ROOMS    Comma-separated Matrix room IDs allowed to trigger turns
+    MATRIX_ALLOWED_ROOMS    Comma-separated Matrix room IDs allowed for all activity
     MATRIX_HOME_ROOM        Room ID for cron/notification delivery
     MATRIX_REACTIONS        Set "false" to disable processing lifecycle reactions
                             (eyes/checkmark/cross). Default: true
     MATRIX_REQUIRE_MENTION      Require @mention in rooms (default: true)
     MATRIX_FREE_RESPONSE_ROOMS  Comma-separated room IDs exempt from mention requirement
                                 (alias of matrix.free_response_rooms)
-    MATRIX_ALLOWED_ROOMS    Comma-separated room IDs; if set, bot ONLY responds
-                            in these rooms (whitelist, DMs exempt; alias of
-                            matrix.allowed_rooms)
     MATRIX_IGNORE_USER_PATTERNS Comma-separated regular expressions for appservice /
                                 bridge ghost user IDs to ignore
     MATRIX_PROCESS_NOTICES      Set "true" to process inbound m.notice events
@@ -140,6 +137,17 @@ from gateway.platforms.helpers import ThreadParticipationTracker
 logger = logging.getLogger(__name__)
 
 _MATRIX_VOICE_WAVEFORM_BINS = 30
+
+
+def _matrix_room_is_allowed(room_id: str, allowed_rooms: Set[str]) -> bool:
+    """Return whether the configured Matrix room boundary permits a room."""
+    return not allowed_rooms or room_id in allowed_rooms
+
+
+def _parse_matrix_room_ids(value: Any) -> Set[str]:
+    if isinstance(value, list):
+        return {str(room).strip() for room in value if str(room).strip()}
+    return {room.strip() for room in str(value or "").split(",") if room.strip()}
 
 
 def _matrix_voice_metadata_for_file(path: Path) -> Dict[str, Any]:
@@ -1065,18 +1073,11 @@ class MatrixAdapter(BasePlatformAdapter):
             self._free_rooms: Set[str] = {
                 r.strip() for r in str(free_rooms_raw).split(",") if r.strip()
             }
-        # If non-empty, bot ONLY responds in these rooms (whitelist); DMs exempt.
+        # If non-empty, bot ONLY operates in these rooms.
         allowed_rooms_raw = config.extra.get("allowed_rooms")
         if allowed_rooms_raw is None:
             allowed_rooms_raw = os.getenv("MATRIX_ALLOWED_ROOMS", "")
-        if isinstance(allowed_rooms_raw, list):
-            self._allowed_rooms: Set[str] = {
-                str(r).strip() for r in allowed_rooms_raw if str(r).strip()
-            }
-        else:
-            self._allowed_rooms: Set[str] = {
-                r.strip() for r in str(allowed_rooms_raw).split(",") if r.strip()
-            }
+        self._allowed_rooms = _parse_matrix_room_ids(allowed_rooms_raw)
         self._allow_room_mentions: bool = os.getenv(
             "MATRIX_ALLOW_ROOM_MENTIONS", "false"
         ).lower() in ("true", "1", "yes")
@@ -1785,6 +1786,8 @@ class MatrixAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a message to a Matrix room."""
 
+        if not self._is_allowed_matrix_room(chat_id):
+            return SendResult(success=False, error="Matrix room is not allowed")
         if not content:
             return SendResult(success=True)
 
@@ -1842,6 +1845,8 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return room name and type (dm/group)."""
+        if not self._is_allowed_matrix_room(chat_id):
+            return {"name": chat_id, "type": "group"}
         identity = await self._resolve_room_identity(chat_id)
         chat_type = "dm" if identity.chat_type == "dm" else "group"
         return {"name": identity.display_name, "type": chat_type}
@@ -1901,6 +1906,8 @@ class MatrixAdapter(BasePlatformAdapter):
         self, chat_id: str, metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """Send a typing indicator."""
+        if not self._is_allowed_matrix_room(chat_id):
+            return
         if self._client:
             try:
                 await self._client.set_typing(RoomID(chat_id), timeout=30000)
@@ -1909,6 +1916,8 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def stop_typing(self, chat_id: str) -> None:
         """Clear the typing indicator."""
+        if not self._is_allowed_matrix_room(chat_id):
+            return
         if self._client:
             try:
                 await self._client.set_typing(RoomID(chat_id), timeout=0)
@@ -1921,6 +1930,8 @@ class MatrixAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Edit an existing message (via m.replace)."""
 
+        if not self._is_allowed_matrix_room(chat_id):
+            return SendResult(success=False, error="Matrix room is not allowed")
         formatted = self.format_message(content)
         new_content = self._build_text_message_content(formatted)
         msg_content: Dict[str, Any] = {
@@ -1957,6 +1968,8 @@ class MatrixAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Download an image URL and upload it to Matrix."""
+        if not self._is_allowed_matrix_room(chat_id):
+            return SendResult(success=False, error="Matrix room is not allowed")
         from tools.url_safety import is_safe_url
 
         if not is_safe_url(image_url):
@@ -2120,7 +2133,7 @@ class MatrixAdapter(BasePlatformAdapter):
         human_delay: float = 0.0,
     ) -> None:
         """Send multiple Matrix images as one ordered logical batch."""
-        if not images:
+        if not images or not self._is_allowed_matrix_room(chat_id):
             return
         from urllib.parse import unquote as _unquote
 
@@ -2180,6 +2193,8 @@ class MatrixAdapter(BasePlatformAdapter):
         unavailable the original file is sent unchanged, preserving the
         previous behaviour).
         """
+        if not self._is_allowed_matrix_room(chat_id):
+            return SendResult(success=False, error="Matrix room is not allowed")
         converted_path: Optional[str] = None
         send_path = audio_path
         if not str(audio_path).lower().endswith((".ogg", ".oga", ".opus")):
@@ -2468,6 +2483,8 @@ class MatrixAdapter(BasePlatformAdapter):
         voice_metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Upload bytes to Matrix and send as a media message."""
+        if not self._is_allowed_matrix_room(room_id):
+            return SendResult(success=False, error="Matrix room is not allowed")
         if len(data) > self._max_media_bytes:
             return SendResult(
                 success=False,
@@ -2558,6 +2575,8 @@ class MatrixAdapter(BasePlatformAdapter):
         is_voice: bool = False,
     ) -> SendResult:
         """Read a local file and upload it."""
+        if not self._is_allowed_matrix_room(room_id):
+            return SendResult(success=False, error="Matrix room is not allowed")
         p = Path(file_path).expanduser()
         if not p.exists():
             # file_path is a host-local path; never echo it into chat.
@@ -2771,26 +2790,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
     def _is_allowed_matrix_room(self, room_id: str) -> bool:
         """Return True when MATRIX_ALLOWED_ROOMS permits the room."""
-        return not self._allowed_room_ids or room_id in self._allowed_room_ids
-
-    async def _is_allowed_matrix_room_event(self, room_id: str) -> bool:
-        """Return True when a room event may proceed past intake filters.
-
-        MATRIX_ALLOWED_ROOMS constrains shared rooms. Matrix DMs are exempt so
-        personal chats still work when operators use a room allowlist for
-        project rooms.
-        """
-        if self._is_allowed_matrix_room(room_id):
-            return True
-        try:
-            return await self._is_dm_room(room_id)
-        except Exception as exc:
-            logger.debug(
-                "Matrix: could not resolve room identity for allowlist check in %s: %s",
-                room_id,
-                exc,
-            )
-            return False
+        return _matrix_room_is_allowed(room_id, self._allowed_room_ids)
 
     async def _on_room_message(self, event: Any) -> None:
         """Handle incoming room message events (text, media)."""
@@ -2830,7 +2830,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 room_id,
             )
             return
-        if not await self._is_allowed_matrix_room_event(room_id):
+        if not self._is_allowed_matrix_room(room_id):
             logger.info(
                 "Matrix: ignoring message from unauthorized room %s",
                 room_id,
@@ -2947,6 +2947,15 @@ class MatrixAdapter(BasePlatformAdapter):
         Returns (body, is_dm, chat_type, thread_id, display_name, source)
         or None if the message should be dropped (mention gating).
         """
+        if not self._is_allowed_matrix_room(room_id):
+            logger.debug(
+                "Matrix: ignoring message %s in %s — room not in "
+                "MATRIX_ALLOWED_ROOMS whitelist",
+                event_id,
+                room_id,
+            )
+            return None
+
         identity = await self._resolve_room_identity(room_id)
         is_dm = await self._is_dm_room(room_id)
         chat_type = "dm" if is_dm else "group"
@@ -2965,18 +2974,6 @@ class MatrixAdapter(BasePlatformAdapter):
 
         # Require-mention gating.
         if not is_dm:
-            # allowed_rooms check (whitelist — must pass before other gating).
-            # When set, messages from rooms NOT in this whitelist are silently
-            # ignored, even if @mentioned.  DMs are already excluded above.
-            if self._allowed_rooms and room_id not in self._allowed_rooms:
-                logger.debug(
-                    "Matrix: ignoring message %s in %s — room not in "
-                    "MATRIX_ALLOWED_ROOMS whitelist",
-                    event_id,
-                    room_id,
-                )
-                return None
-
             is_free_room = room_id in self._free_rooms
             in_bot_thread = bool(thread_id and thread_id in self._threads)
             is_command = body.startswith("/")
@@ -3335,6 +3332,10 @@ class MatrixAdapter(BasePlatformAdapter):
         is_direct = bool(getattr(content, "is_direct", False))
         inviter = str(getattr(event, "sender", ""))
 
+        if not self._is_allowed_matrix_room(room_id):
+            logger.warning("Matrix: rejecting invite to unauthorized room %s", room_id)
+            return
+
         # Only auto-join when the inviter is authorized. Without this, any
         # federated Matrix user could invite the bot into arbitrary rooms,
         # exposing its presence and metadata. Mirrors the allow-list gate
@@ -3371,7 +3372,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _join_room_by_id(self, room_id: str) -> bool:
         """Join a room by ID and refresh local caches on success."""
-        if not room_id:
+        if not room_id or not self._is_allowed_matrix_room(room_id):
             return False
         if room_id in self._joined_rooms:
             return True
@@ -3408,7 +3409,11 @@ class MatrixAdapter(BasePlatformAdapter):
         inviter: str = "",
     ) -> None:
         """Schedule an invite join without blocking sync or gateway readiness."""
-        if not room_id or room_id in self._joined_rooms:
+        if (
+            not room_id
+            or not self._is_allowed_matrix_room(room_id)
+            or room_id in self._joined_rooms
+        ):
             return
         existing = self._invite_join_tasks.get(room_id)
         if existing and not existing.done():
@@ -3437,7 +3442,9 @@ class MatrixAdapter(BasePlatformAdapter):
         if not isinstance(invites, dict):
             return
         for room_id in invites:
-            if room_id in self._joined_rooms:
+            if room_id in self._joined_rooms or not self._is_allowed_matrix_room(
+                str(room_id)
+            ):
                 continue
             logger.info("Matrix: reconciling pending invite for %s", room_id)
             self._schedule_invite_join(str(room_id))
@@ -3456,7 +3463,7 @@ class MatrixAdapter(BasePlatformAdapter):
         Returns the reaction event_id on success, None on failure.
         """
 
-        if not self._client:
+        if not self._client or not self._is_allowed_matrix_room(room_id):
             return None
         content = {
             "m.relates_to": {
@@ -3559,11 +3566,13 @@ class MatrixAdapter(BasePlatformAdapter):
         sender = str(getattr(event, "sender", ""))
         if self._is_self_sender(sender):
             return
+        room_id = str(getattr(event, "room_id", ""))
+        if not self._is_allowed_matrix_room(room_id):
+            return
         event_id = str(getattr(event, "event_id", ""))
         if self._is_duplicate_event(event_id):
             return
 
-        room_id = str(getattr(event, "room_id", ""))
         content = getattr(event, "content", None)
         if content:
             relates_to = (
@@ -3894,7 +3903,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def send_read_receipt(self, room_id: str, event_id: str) -> bool:
         """Send a read receipt (m.read) for an event."""
-        if not self._client:
+        if not self._client or not self._is_allowed_matrix_room(room_id):
             return False
         try:
             room = RoomID(room_id)
@@ -3929,7 +3938,7 @@ class MatrixAdapter(BasePlatformAdapter):
         reason: str = "",
     ) -> bool:
         """Redact (delete) a message or event from a room."""
-        if not self._client:
+        if not self._client or not self._is_allowed_matrix_room(room_id):
             return False
         try:
             await self._client.redact(
@@ -3956,7 +3965,7 @@ class MatrixAdapter(BasePlatformAdapter):
         preset: str = "private_chat",
     ) -> Optional[str]:
         """Create a new Matrix room."""
-        if not self._client:
+        if not self._client or self._allowed_room_ids:
             return None
         if preset == "public_chat" and os.getenv("MATRIX_ALLOW_PUBLIC_ROOMS", "").lower() not in (
             "true",
@@ -3989,7 +3998,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def invite_user(self, room_id: str, user_id: str) -> bool:
         """Invite a user to a room."""
-        if not self._client:
+        if not self._client or not self._is_allowed_matrix_room(room_id):
             return False
         try:
             await self._client.invite_user(RoomID(room_id), UserID(user_id))
@@ -4006,7 +4015,7 @@ class MatrixAdapter(BasePlatformAdapter):
         from_token: str = "",
     ) -> list[dict[str, Any]]:
         """Fetch recent Matrix room history using the live client."""
-        if not self._client:
+        if not self._client or not self._is_allowed_matrix_room(room_id):
             return []
         limit = max(1, min(int(limit or 20), 100))
         try:
@@ -4096,6 +4105,8 @@ class MatrixAdapter(BasePlatformAdapter):
         msgtype: str,
     ) -> SendResult:
         """Send a simple message (emote, notice) with optional HTML formatting."""
+        if not self._is_allowed_matrix_room(chat_id):
+            return SendResult(success=False, error="Matrix room is not allowed")
         if not self._client or not text:
             return SendResult(success=False, error="No client or empty text")
 
@@ -4769,6 +4780,12 @@ async def _standalone_send(
     """
     extra = getattr(pconfig, "extra", {}) or {}
     token = getattr(pconfig, "token", None)
+    allowed_rooms_raw = extra.get("allowed_rooms")
+    if allowed_rooms_raw is None:
+        allowed_rooms_raw = os.getenv("MATRIX_ALLOWED_ROOMS", "")
+    allowed_rooms = _parse_matrix_room_ids(allowed_rooms_raw)
+    if not _matrix_room_is_allowed(str(chat_id), allowed_rooms):
+        return {"error": "Matrix room is not allowed"}
     try:
         import aiohttp
     except ImportError:

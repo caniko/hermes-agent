@@ -76,6 +76,7 @@ def _make_adapter(allowed_user_ids=None):
     adapter = object.__new__(MatrixAdapter)
     adapter._user_id = "@bot:matrix.org"
     adapter._allowed_user_ids = set(allowed_user_ids) if allowed_user_ids else set()
+    adapter._allowed_room_ids = set()
     adapter._approval_reaction_map = {"✅": "once", "❎": "deny"}
     adapter._approval_prompts_by_event = {}
     adapter._approval_prompt_by_session = {}
@@ -131,5 +132,4 @@ class TestApprovalReactionFailClosed:
         adapter = _make_adapter(allowed_user_ids=None)
         event = _make_event("@stranger:matrix.org", "$prompt-event-1")
         assert _run(adapter, event) is False
-
 

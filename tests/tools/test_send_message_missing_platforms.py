@@ -190,6 +190,31 @@ class TestSendMatrix:
         assert len(txn_ids) == 2
         assert txn_ids[0] != txn_ids[1]
 
+    def test_scheduled_delivery_cannot_escape_room_allowlist(self):
+        pconfig = SimpleNamespace(
+            token="tok",
+            extra={
+                "homeserver": "https://matrix.example.com",
+            },
+        )
+
+        with patch.dict(
+            os.environ,
+            {"MATRIX_ALLOWED_ROOMS": "!allowed:example.com"},
+            clear=False,
+        ), patch("aiohttp.ClientSession") as client_session:
+            result = asyncio.run(
+                _matrix_standalone_send(
+                    pconfig,
+                    "!other:example.com",
+                    "blocked",
+                    media_files=[("/tmp/private.png", False)],
+                )
+            )
+
+        assert result == {"error": "Matrix room is not allowed"}
+        client_session.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # _send_homeassistant
