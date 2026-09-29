@@ -3,6 +3,7 @@
 import os
 import shlex
 import shutil
+from contextlib import nullcontext
 
 import pytest
 
@@ -13,11 +14,12 @@ from tools.terminal_tool_backends import _build_ssh_env, _ssh_config_from_config
 
 
 @pytest.mark.platforms("posix")
-def test_profile_worker_homes_sync_and_execute_independently(tmp_path, monkeypatch):
+@pytest.mark.parametrize("transport", ["shell", "openssh"])
+def test_profile_worker_homes_sync_and_execute_independently(tmp_path, monkeypatch, transport):
     """Exercise YAML -> scope -> backend -> real tar/shell I/O for A -> B -> A.
 
-    The transport executes locally in a disposable login home; everything above
-    transport (including sync-back) is real. No SSH service or model is needed.
+    Both transports use a disposable login home; the OpenSSH variant starts its
+    own loopback sshd. Synchronization and command I/O are real; no model is used.
     """
     login_home = tmp_path / "login"
     personal = login_home / ".hermes"
@@ -28,11 +30,22 @@ def test_profile_worker_homes_sync_and_execute_independently(tmp_path, monkeypat
     workspace.mkdir()
     bash = shutil.which("bash")
     assert bash
-    monkeypatch.setattr(SSHEnvironment, "_build_ssh_command", lambda self, *a, **k: [
-        "env", f"HOME={login_home}", bash, "--noprofile", "--norc", "-c", 'eval "$*"', "ssh-fixture"])
-    # Session snapshots are separately covered; do not source host login scripts.
+    if transport == "shell":
+        monkeypatch.setattr(SSHEnvironment, "_build_ssh_command", lambda self, *a, **k: [
+            "env", f"HOME={login_home}", bash, "--noprofile", "--norc", "-c", 'eval "$*"', "ssh-fixture"])
+        monkeypatch.setattr(SSHEnvironment, "_control_sockets", lambda self: [])
+        connection = nullcontext({"host": "fixture", "user": "worker", "port": 22, "key": ""})
+    else:
+        from tests.tools.ssh_worker_transport import openssh_transport
+        connection = openssh_transport(tmp_path / "sshd", login_home, monkeypatch)
+    # Avoid sourcing host login scripts in the transport fixture.
     monkeypatch.setattr(SSHEnvironment, "init_session", lambda self: None)
-    monkeypatch.setattr(SSHEnvironment, "_control_sockets", lambda self: [])
+
+    with connection as target:
+        _exercise_profiles(tmp_path, workspace, target, sentinel, personal)
+
+
+def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
 
     profiles = {}
     for name in ("a", "b"):
@@ -43,7 +56,8 @@ def test_profile_worker_homes_sync_and_execute_independently(tmp_path, monkeypat
         skill.write_text(f"skill-{name}")
         remote = tmp_path / f"worker '{name}'"
         (profile / "config.yaml").write_text(
-            f"terminal:\n  backend: ssh\n  ssh_host: fixture\n  ssh_user: worker\n"
+            f"terminal:\n  backend: ssh\n  ssh_host: {target['host']}\n  ssh_user: {target['user']}\n"
+            f"  ssh_port: {target['port']}\n  ssh_key: {target['key']}\n"
             f"  ssh_hermes_home: {remote}\n  cwd: {workspace}\n")
         profiles[name] = (profile, remote, skill)
 
