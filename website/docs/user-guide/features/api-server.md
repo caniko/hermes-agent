@@ -465,6 +465,46 @@ When `session_id` identifies an existing Hermes session and no explicit
 that session's active transcript. Session turn leases serialize concurrent
 writers and refresh the transcript after a contended wait.
 
+#### Require a configured execution target
+
+An orchestrator maintaining an existing directory can send `execution_context`
+as a precondition. First require `features.runs_execution_context.version: 1`
+from authenticated `GET /v1/capabilities`; older servers may ignore unknown fields.
+
+```json
+{
+  "input": "Maintain the selected data directory",
+  "execution_context": {
+    "version": 1,
+    "backend": "ssh",
+    "cwd": "/srv/alice/data",
+    "ssh": {"host": "workstation.example.net", "port": 22, "user": "alice"}
+  }
+}
+```
+
+For a local worker, use `backend: "local"` and omit `ssh`. The backend, initial
+directory and SSH connection identity must exactly match the served profile's
+effective terminal configuration. Paths are compared as configured; remote paths
+are never resolved on the API server. Invalid contracts return 400; mismatches
+or an existing conversation held by another live owner return 409 before work
+is admitted. Local directories must already exist. SSH directory accessibility
+is checked on the target before agent construction; a missing root fails the run.
+The accepted context is retained in the run status and idempotency receipt.
+This version does not combine
+with hosted-room dispatch.
+
+The admitted terminal policy is pinned through agent construction and executor
+handoff. This does not change the profile configuration, transfer SSH credentials,
+or grant filesystem access. It is an initial-target check, not containment: tools
+can subsequently change directory within the executing account's permissions.
+Configure Unix/service permissions separately. Use a distinct conversation ID
+when changing target so previous conversation history does not follow it.
+Bound runs do not grant background-delegation wake authority: continuation must
+come from a client that sends the precondition again.
+Unbound requests keep their existing behavior. Idempotent replays return the
+original receipt, even if the worker's configuration has since changed.
+
 ### GET /v1/runs/\{run_id\}
 
 Poll the current run state. This is useful for dashboards that need status without holding an SSE connection open, or for UIs that reconnect after navigation.

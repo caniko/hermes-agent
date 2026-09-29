@@ -11,6 +11,9 @@ import uuid
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
+from gateway.platforms.api_server_execution_context import (
+    ExecutionContext, ExecutionContextError, bind_execution_context, capture_execution_context,
+    verify_execution_directory)
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
@@ -501,6 +504,7 @@ class _RunLaunch:
     browser_control_principal: Any
     browser_control_transport_family: Any
     turn_author: Optional[Dict[str, Any]] = None  # memory-attribution label only; grants nothing
+    execution_context: Optional[ExecutionContext] = None
 
     @property
     def approval_session_key(self) -> str:
@@ -682,12 +686,17 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
             retention_until=_room_retention_until(request))
         if outcome == "conflict" or (outcome == "reused" and record is not None):
             return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
+    try:
+        execution_context = capture_execution_context(body["execution_context"]) if "execution_context" in body else None
+        if execution_context is not None and room_dispatch is not None:
+            raise ExecutionContextError("execution_context cannot be combined with hosted_room_dispatch", status=400)
+    except ExecutionContextError as exc:
+        return _json_error(_openai_error, str(exc), code="execution_context_mismatch", status=exc.status)
     # Enforce concurrency only for a genuinely new run.
     limited = self._concurrency_limited_response()
     if limited is not None:
         return limited
     run_id = f"run_{uuid.uuid4().hex}"
-    self._run_owners[run_id] = self._run_idempotency_scope(request)
     # Same precedence as /v1/responses: body session_id > response chain > X-Hermes-Session-Key
     # conversation > run_id (which would otherwise re-key every affinity surface per run).
     # An explicit or chained session owns its routing key and is never rebound to the header.
@@ -701,6 +710,11 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     if selected_session_id:
         selected_session_id = await _resolve_live_session_id(self, str(selected_session_id))
     session_id = selected_session_id or run_id
+    if execution_context is not None and selected_session_id:
+        try:
+            await self._admit_to_live_bot_chat(session_id, user_message, turn_author, allow_handoff=False)
+        except ExecutionContextError as exc:
+            return _json_error(_openai_error, str(exc), code="execution_context_mismatch", status=exc.status)
     # History loads for the session the request actually selected — including one resolved from
     # a declared X-Hermes-Session-Key, whose persisted delivery rows must reach the next
     # same-key run's context (#98619).  previous_response_id continuations keep their
@@ -709,14 +723,18 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     # nothing persisted to load yet.  Wake authority is fixed here, before the load can
     # overwrite ``conversation_history``: a caller-supplied history is authoritative for this
     # turn, never consumes the SessionDB delivery row, and is denied on the same contract.
-    session_history_delivery = not previous_response_id and not conversation_history
+    # Internal wake requests cannot yet carry an execution-context precondition.
+    # Bound clients continue explicitly; never authorize an unbound autonomous turn.
+    session_history_delivery = execution_context is None and not previous_response_id and not conversation_history
     if not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
+    self._run_owners[run_id] = self._run_idempotency_scope(request)
     q = self._run_streams[run_id] = _RunStream()
     created_at = self._run_streams_created[run_id] = time.time()
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
     initial_status = self._set_run_status(
-        run_id, "queued", created_at=created_at, session_id=session_id, model=body.get("model", self._model_name))
+        run_id, "queued", created_at=created_at, session_id=session_id, model=body.get("model", self._model_name),
+        **({"execution_context": execution_context.requested} if execution_context is not None else {}))
     if idempotency_key:
         outcome, record = self._run_idempotency_store.reserve(
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
@@ -738,12 +756,13 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
-        turn_author=turn_author)
+        turn_author=turn_author, execution_context=execution_context)
     self._activate_admitted_request()
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
     # receipt drives this run's status, so `peer run` keeps its run_id and `peer status` still works.
-    admitted = await self._admit_to_live_bot_chat(session_id, user_message, turn_author) if selected_session_id else None
+    admitted = (await self._admit_to_live_bot_chat(session_id, user_message, turn_author)
+                if selected_session_id and execution_context is None else None)
     if admitted is not None:
         task = self._active_run_tasks[run_id] = asyncio.create_task(
             _execute_run_via_live_owner(self, launch, *admitted, _api_server=_api_server))
@@ -792,10 +811,10 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
     from tools.approval import register_gateway_notify, unregister_gateway_notify
     from tools.approval_context import reset_current_session_key, set_current_session_key
     session_id = run.session_id
-    effective_task_id = session_id or run.run_id
+    effective_task_id = run.run_id if run.execution_context is not None else session_id or run.run_id
     # (token, reset) pairs unwound in the finally block; bound only once each step succeeds.
     resets: list[tuple[Any, Callable]] = []
-    with self._profile_scope(run.request_profile):
+    with self._profile_scope(run.request_profile), bind_execution_context(run.execution_context):
         try:
             # Contextvars, not process env: concurrent runs must not share identity.
             resets.append((set_current_session_key(run.approval_session_key), reset_current_session_key))
@@ -957,7 +976,12 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         if run_id in self._stopping_run_ids:
             _finish("cancelled")
             return
-        with self._profile_scope(run.request_profile):
+        with self._profile_scope(run.request_profile), bind_execution_context(run.execution_context):
+            if run.execution_context is not None:
+                await asyncio.to_thread(verify_execution_directory, run.execution_context)
+                if run_id in self._stopping_run_ids or run_id in self._shutdown_interrupted_run_ids:
+                    _finish("cancelled")
+                    return
             agent = self._create_agent(
                 stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
                 interim_assistant_callback=_interim_cb, **run.agent_kwargs)
