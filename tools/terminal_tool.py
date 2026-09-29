@@ -759,6 +759,7 @@ def _get_env_config() -> Dict[str, Any]:
         "ssh_user": _tenv("TERMINAL_SSH_USER", ""),
         "ssh_port": _parse_env_var("TERMINAL_SSH_PORT", "22"),
         "ssh_key": _tenv("TERMINAL_SSH_KEY", ""),
+        "ssh_hermes_home": _tenv("TERMINAL_SSH_HERMES_HOME", ""),
         # Persistent shell: SSH defaults to the config-level persistent_shell
         # setting; local is always opt-in. Per-backend env vars override.
         "ssh_persistent": _tenv_bool(

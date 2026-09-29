@@ -332,6 +332,9 @@ DEFAULT_CONFIG = {
         # HERMES_HOME/home; "real" = force real HOME; "profile" = force HERMES_HOME/home when it
         # exists (strict per-profile isolation).
         "home_mode": "auto",
+        # SSH worker state, independent of the login user's personal Hermes install.
+        # Empty preserves <remote login HOME>/.hermes; otherwise an absolute remote path.
+        "ssh_hermes_home": "",
         # Extra files sourced in the login shell when building the per-session env snapshot — for
         # nvm/pyenv/asdf/PATH entries registered by files a bash login shell skips (~/.bashrc,
         # ~/.zshrc, ~/.zprofile). Supports ~ and ${VAR}; missing files skipped. When empty and the
