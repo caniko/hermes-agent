@@ -15,7 +15,7 @@ from gateway.platforms.api_server import APIServerAdapter
 @pytest.mark.asyncio
 @pytest.mark.parametrize("when", ["before_create", "during_admission"])
 async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, monkeypatch, when):
-    import yaml
+    import hermes_yaml as yaml
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))

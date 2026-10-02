@@ -151,7 +151,7 @@ def test_systemd_submission_delayed_past_seal_cannot_execute_work(tmp_path, targ
 @pytest.mark.parametrize("backend", ["local", "ssh"])
 def test_terminal_dispatch_keeps_supervised_background_descendants_owned(tmp_path, target, backend, monkeypatch):
     import json
-    import yaml
+    import hermes_yaml as yaml
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     from tools.environments.supervised_execution import SupervisionBinding, bind_job_supervision
     from tools.environments.systemd_jobs import SystemdJobSupervisor

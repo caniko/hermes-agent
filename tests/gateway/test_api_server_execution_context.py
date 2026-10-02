@@ -166,7 +166,7 @@ async def test_runs_check_and_pin_the_served_target(tmp_path, monkeypatch, backe
 @pytest.mark.parametrize("tool", ["terminal", "execute_code", "execute_code_active"])
 async def test_run_remains_owned_until_jobs_settle_and_stop_fences_them(tmp_path, monkeypatch, backend, ssh_target, tool):
     import subprocess
-    import yaml
+    import hermes_yaml as yaml
     from tools.environments.local import build_subprocess_env
     from tools.process_registry import systemd_user_bus_env
     from tools.terminal_tool import terminal_tool
