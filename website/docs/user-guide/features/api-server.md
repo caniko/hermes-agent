@@ -505,6 +505,45 @@ come from a client that sends the precondition again.
 Unbound requests keep their existing behavior. Idempotent replays return the
 original receipt, even if the worker's configuration has since changed.
 
+#### Keep a run open until its jobs finish
+
+Add `"lifetime": "wait_for_jobs"` to `execution_context` when terminal jobs and
+their descendants must finish before the run becomes terminal. Require
+`features.runs_execution_context.lifetimes` to contain `wait_for_jobs` before
+posting the request. This mode also requires an `Idempotency-Key`, durable run
+storage, and (for SSH) an explicit `terminal.ssh_hermes_home` on the execution
+host. Replay an uncertain admission with the identical key, body, and session
+header; a lost acknowledgement does not establish that no work started.
+
+The initial supervisor uses the execution user's systemd user manager on Linux
+with cgroup v2. It probes support before constructing the agent. The user manager
+must be reachable from the local worker or SSH login and support `ExitType=cgroup`
+and `systemd-run --expand-environment=no`. The supervisor interface separates
+job ownership from the local/SSH transport so other supervisors can implement the
+same contract.
+
+Foreground terminal calls return when their shell exits. Background terminal
+completion and the API run remain live while descendants (including detached
+processes with closed output streams) are running. Delegated workers remain owned
+until their actual executor futures finish. `execute_code` retains variables
+between cells within a run; its interpreter exits at run completion, and any
+remaining child processes still hold the run open. Kernels are not resumed by a
+later run.
+
+Stop, cancellation, and failed turns fence new launches and terminate admitted
+jobs before publishing a terminal state. A `stopping` acknowledgement only
+confirms that stopping was requested. Loss of the SSH/control channel leaves the
+run nonterminal until settlement can be verified. After a gateway restart,
+polling or stopping the durable run triggers recovery of its target-side receipts;
+the gateway stops those jobs before publishing `interrupted`. Recovery uses the
+configured target, so retain the original worker profile until its runs settle.
+
+This lifetime covers the supervised terminal and `execute_code` backends and
+their delegation workers. It does not bring externally scheduled services or
+independent MCP/provider jobs into the run's cgroup. A filesystem lock must be
+held by the orchestrator until a terminal run receipt, including during network
+loss. The execution-context precondition itself is not a filesystem lock.
+
 ### GET /v1/runs/\{run_id\}
 
 Poll the current run state. This is useful for dashboards that need status without holding an SSE connection open, or for UIs that reconnect after navigation.
@@ -524,9 +563,9 @@ Poll the current run state. This is useful for dashboards that need status witho
 
 `model` echoes what the request asked for. On a completed run, `runtime` is the provider/model pair that actually served the turn — after a [fallback provider](fallback-providers.md) switch it names the fallback pair, so a cost-attribution poller books the run to the right provider. `usage.cache_read_tokens` / `usage.cache_write_tokens` are the session's prompt-cache reads and writes, so cached input is not priced as full-price input. `runtime` has the same shape as on `/v1/chat/completions` and `/v1/responses`: `route_source` says how the runtime was chosen (`global`, `raw_request`, `model_routes`), and a request that named a `model`/`provider` also gets `requested: {provider, model}` so the asked-for and served pairs can be compared. The `run.completed` event on the events stream carries the same `usage` and `runtime` fields.
 
-Statuses are retained briefly after terminal states (`completed`, `failed`, `cancelled`, or `interrupted`) for polling and UI reconciliation. When the gateway shuts down while a run is active, the run is persisted as `interrupted` (error `Gateway shutdown interrupted the run.`, terminal event `run.interrupted`) before the agent is asked to stop, so a durable run never survives a restart as `running`; a late result from the interrupted turn cannot overwrite it.
+Statuses are retained briefly after terminal states (`completed`, `failed`, `cancelled`, or `interrupted`) for polling and UI reconciliation. For ordinary runs, gateway shutdown persists `interrupted` (error `Gateway shutdown interrupted the run.`, terminal event `run.interrupted`) before asking the agent to stop; a late result cannot overwrite it. A `wait_for_jobs` run instead stays nonterminal until its owned jobs have stopped, including when recovery must continue after restart.
 
-While the gateway is still draining (a `hermes gateway stop`/`restart` or SIGTERM with a turn in flight), every non-terminal run additionally carries `shutdown_requested_at` (Unix seconds) from the moment new turns are refused. `status` stays `running` because the turn is still being served; a poller that sees the field knows the process is on its way out and the run will end `interrupted` at the latest when the drain budget expires. Terminal runs never gain the field.
+While the gateway is still draining (a `hermes gateway stop`/`restart` or SIGTERM with a turn in flight), every non-terminal run additionally carries `shutdown_requested_at` (Unix seconds) from the moment new turns are refused. A poller that sees the field knows the process is on its way out. Ordinary runs end `interrupted` at the latest when the drain budget expires; `wait_for_jobs` runs may remain `stopping` while target settlement is pending. Terminal runs never gain the field.
 
 ### GET /v1/runs/\{run_id\}/events
 

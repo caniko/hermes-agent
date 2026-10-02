@@ -1654,6 +1654,10 @@ class TestRunIdempotency:
                 "run-done",
                 {"status": "completed"},
             )[0] == "created"
+            assert store.reserve(
+                "tenant", "owned-key", "owned-fingerprint", "run-owned",
+                {"status": "completed", "execution_context": {"lifetime": "wait_for_jobs"}},
+            )[0] == "created"
 
         after_retention = 100 + RunIdempotencyStore.RETENTION_SECONDS + 1
         with patch(
@@ -1665,11 +1669,16 @@ class TestRunIdempotency:
             done, done_record = store.lookup(
                 "tenant", "done-key", "done-fingerprint"
             )
+            owned, owned_record = store.lookup("tenant", "owned-key", "owned-fingerprint")
 
         assert active == "reused"
         assert active_record["run_id"] == "run-active"
         assert done == "missing"
         assert done_record is None
+        # An offline orchestrator can still hold filesystem ownership. Replaying
+        # its lost terminal acknowledgement must never launch the command again.
+        assert owned == "reused"
+        assert owned_record["run_id"] == "run-owned"
         store.close()
 
     def test_room_terminal_receipt_survives_offline_home_until_grant_horizon(

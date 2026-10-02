@@ -244,6 +244,13 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     for local/ssh/vercel; ``container_config`` carries the container_*/docker_* resource keys; ``host_cwd`` is
     the host dir bound into Docker when cwd mounting is enabled. ``probe_only`` asks ssh for a throwaway
     connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends."""
+    from tools.environments.supervised_execution import current_job_supervision
+
+    binding = current_job_supervision()
+    if binding is not None and binding.supervisor is not None and not probe_only:
+        from tools.environments.owned import OwnedEnvironment
+
+        return OwnedEnvironment(binding, cwd, timeout)
     builder = _ENV_BUILDERS.get(env_type)
     kwargs = dict(image=image, cwd=cwd, timeout=timeout, cc=container_config or {}, task_id=task_id,
                   ssh_config=ssh_config, host_cwd=host_cwd, probe_only=probe_only)

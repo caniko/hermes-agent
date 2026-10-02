@@ -858,7 +858,9 @@ class _ChildRun:
                     user_message=user_message, task_id=self.child_task_id, stream_callback=self.relay_text,
                 )
 
-        future = executor.submit(contextvars.copy_context().run, _run_with_thread_capture)
+        from tools.environments.supervised_execution import submit_owned_worker
+        future = submit_owned_worker(executor, contextvars.copy_context().run, _run_with_thread_capture,
+                                     interrupt=lambda: _signal_child_stop(child))
         # One wait covers both ways out: the worker finishing, or the heartbeat's stale verdict.
         # Without the second, a worker wedged after its final answer holds a finite (-Q / Bot Chat
         # one-shot) turn — and its session lease — forever, since that runtime has no gateway

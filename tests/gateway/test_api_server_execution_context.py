@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import shlex
+import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
@@ -159,6 +161,130 @@ async def test_runs_check_and_pin_the_served_target(tmp_path, monkeypatch, backe
 
 
 @pytest.mark.asyncio
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("backend", ["local", "ssh"])
+@pytest.mark.parametrize("tool", ["terminal", "execute_code", "execute_code_active"])
+async def test_run_remains_owned_until_jobs_settle_and_stop_fences_them(tmp_path, monkeypatch, backend, ssh_target, tool):
+    import subprocess
+    import yaml
+    from tools.environments.local import build_subprocess_env
+    from tools.process_registry import systemd_user_bus_env
+    from tools.terminal_tool import terminal_tool
+    from tools.terminal_tool_lifecycle import cleanup_vm
+
+    probe = subprocess.run(["systemctl", "--user", "show", "--property=Version"], capture_output=True,
+                           env=systemd_user_bus_env(build_subprocess_env()))
+    if probe.returncode:
+        pytest.skip("a systemd user manager is required")
+    home, data = tmp_path / "worker", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    terminal = {"backend": backend, "cwd": str(data)}
+    context = {"version": 1, "backend": backend, "cwd": str(data), "lifetime": "wait_for_jobs"}
+    if backend == "ssh":
+        terminal.update(ssh_host=ssh_target["host"], ssh_user=ssh_target["user"], ssh_port=ssh_target["port"],
+                        ssh_key=ssh_target["key"], ssh_hermes_home=str(tmp_path / "remote-worker"))
+        context["ssh"] = {k: ssh_target[k] for k in ("host", "user", "port")}
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "terminal": terminal, "approvals": {"unattended_mode": "approve"}}))
+    monkeypatch.setenv("__ETC_PROFILE_SOURCED", "1")
+    adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "fixture-key"}))
+    tasks = []
+    completed_models = set()
+
+    def create_agent(**kwargs):
+        agent = MagicMock()
+        agent.session_id = kwargs["session_id"]
+        def run(task_id, **_):
+            from hermes_cli.config import get_config_path, load_config_readonly
+            assert get_config_path() == home / "config.yaml"
+            assert load_config_readonly()["approvals"]["unattended_mode"] == "approve"
+            tasks.append(task_id)
+            child = (f"echo ready > {shlex.quote(str(data / task_id))}; "
+                     f"while test ! -e {shlex.quote(str(data / ('release-' + task_id)))}; do sleep .05; done")
+            if tool == "terminal":
+                result = json.loads(terminal_tool(command=f"setsid bash -c {shlex.quote(child)} </dev/null >/dev/null 2>&1 &",
+                                                  background=True, task_id=task_id))
+                assert result.get("exit_code") == 0, result
+            else:
+                from tools.code_execution_tool import execute_code
+                code = ("import subprocess, os\nvalue = 41\n"
+                        f"assert os.getcwd() == {str(data)!r}\n"
+                        f"subprocess.Popen(['bash', '-c', {child!r}], start_new_session=True, "
+                        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n")
+                if tool == "execute_code_active":
+                    code += ("import time\n"
+                             f"while not os.path.exists({str(data / ('release-' + task_id))!r}): time.sleep(.05)\n")
+                result = json.loads(execute_code(code, task_id=task_id))
+                if tool == "execute_code_active" and run_is_cancelled(task_id):
+                    assert result["status"] == "interrupted", result
+                    return {"interrupted": True, "completed": False}
+                assert result["status"] == "success", result
+                result = json.loads(execute_code("print(value + 1)", task_id=task_id))
+                assert result["status"] == "success" and result["output"].strip() == "42", result
+            completed_models.add(task_id)
+            return {"final_response": "model finished", "completed": True}
+        agent.run_conversation.side_effect = run
+        return agent
+    monkeypatch.setattr(adapter, "_create_agent", create_agent)
+    def run_is_cancelled(run_id):
+        return run_id in adapter._stopping_run_ids
+    app = web.Application()
+    app.router.add_post("/v1/runs", adapter._handle_runs)
+    app.router.add_get("/v1/runs/{run_id}", adapter._handle_get_run)
+    app.router.add_post("/v1/runs/{run_id}/stop", adapter._handle_stop_run)
+    app.router.add_post("/v1/runs/stop", adapter._handle_stop_admission)
+    app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
+    headers = {"Authorization": "Bearer fixture-key"}
+    with profile_scope(home):
+        try:
+            async with TestClient(TestServer(app)) as client:
+                capability = (await (await client.get("/v1/capabilities", headers=headers)).json())["features"]["runs_execution_context"]
+                assert context["lifetime"] in capability["lifetimes"]
+                for cancel in (False, True):
+                    response = await client.post("/v1/runs", headers={**headers, "Idempotency-Key": str(cancel)},
+                                                 json={"input": "work", "execution_context": context})
+                    assert response.status == 202, await response.text()
+                    run_id = (await response.json())["run_id"]
+                    deadline = time.monotonic() + 45
+                    while not (data / run_id).exists() or (tool != "execute_code_active" and run_id not in completed_models):
+                        assert adapter._run_statuses[run_id]["status"] not in {"failed", "cancelled"}, adapter._run_statuses[run_id]
+                        assert time.monotonic() < deadline, adapter._run_statuses[run_id]
+                        await asyncio.sleep(.05)
+                    status = await (await client.get(f"/v1/runs/{run_id}", headers=headers)).json()
+                    assert status["status"] == "running", status
+                    assert run_id in adapter._active_run_tasks
+                    if tool == "execute_code":
+                        with pytest.raises(asyncio.TimeoutError):
+                            await asyncio.wait_for(asyncio.shield(adapter._active_run_tasks[run_id]), 2)
+                    if cancel and tool == "terminal":
+                        stopped = await client.post("/v1/runs/stop", headers={**headers, "Idempotency-Key": str(cancel)},
+                                                    json={"input": "work", "execution_context": context})
+                        assert stopped.status == 200, await stopped.text()
+                        assert (await stopped.json())["status"] == "stopping"
+                    elif cancel:
+                        stopped = await client.post(f"/v1/runs/{run_id}/stop", headers=headers)
+                        assert (await stopped.json())["status"] == "stopping"
+                    else:
+                        (data / ("release-" + run_id)).touch()
+                    await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 20)
+                    assert adapter._run_statuses[run_id]["status"] == ("cancelled" if cancel else "completed")
+                    assert run_id not in adapter._active_run_agents
+                    if tool != "terminal":
+                        from tools.code_kernel_remote import _REMOTE_KERNELS
+                        assert not any(run_id in str(part) for key in _REMOTE_KERNELS for part in key)
+        finally:
+            for task in tasks:
+                (data / ("release-" + task)).touch()
+            for run_id in list(adapter._active_run_tasks):
+                adapter._stopping_run_ids.add(run_id)
+            if adapter._active_run_tasks:
+                await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 20)
+            for task in tasks:
+                cleanup_vm(task)
+
+
+@pytest.mark.asyncio
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("backend", ["local", "ssh"])
 async def test_bound_agent_edits_the_selected_directory_with_real_tools(tmp_path, monkeypatch, backend, ssh_target):
@@ -209,12 +335,12 @@ async def test_bound_agent_edits_the_selected_directory_with_real_tools(tmp_path
                 else:
                     provider.push(ToolCall("write_file", {"path": "result.txt", "content": f"{name}-{turn}"}))
                 provider.push(
-                    ToolCall("terminal", {"command": "pwd; cat result.txt"}),
+                    ToolCall("terminal", {"command": "pwd; cat result.txt; cd .."}),
                     Text("done"),
                 )
                 response = await client.post("/v1/runs", headers={
                     "Authorization": "Bearer fixture-key", "Test-Profile": name,
-                }, json={"input": "Update result.txt", "execution_context": context})
+                }, json={"input": "Update result.txt", "session_id": f"maintenance-{name}", "execution_context": context})
                 assert response.status == 202, await response.text()
                 run_id = (await response.json())["run_id"]
                 await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 30)

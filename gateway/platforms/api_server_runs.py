@@ -10,10 +10,14 @@ import time
 import uuid
 from collections import deque
 from contextlib import suppress
+from contextvars import copy_context
 from dataclasses import dataclass
 from gateway.platforms.api_server_execution_context import (
     ExecutionContext, ExecutionContextError, bind_execution_context, capture_execution_context,
     verify_execution_directory)
+from gateway.platforms.api_server_job_lifetime import (
+    create_job_lifetime, ensure_job_recovery, request_job_stop, settle_failed_run, supervision_record, waits_for_jobs)
+from tools.environments.supervised_execution import bind_job_supervision
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
@@ -61,10 +65,11 @@ def _submit_api_worker(loop, fn):
     global _API_WORKER_LIVE
     with _API_WORKER_LOCK:
         _API_WORKER_LIVE += 1
+    context = copy_context()
 
     def _counted():
         try:
-            return fn()
+            return context.run(fn)
         finally:
             global _API_WORKER_LIVE
             with _API_WORKER_LOCK:
@@ -227,6 +232,7 @@ def _initialize_run_state(self, *, store_factory) -> None:
     self._run_idempotency_ids: set[str] = set()
     self._stopping_run_ids: set[str] = set()
     self._shutdown_interrupted_run_ids: set[str] = set()
+    self._run_job_lifetimes: dict = {}
     self._run_shutdown_requested_at: Optional[float] = None
     (
         self._run_owners, self._run_streams, self._run_streams_created, self._active_run_agents,
@@ -236,6 +242,8 @@ def _initialize_run_state(self, *, store_factory) -> None:
 
 def _http_routes(self) -> list[tuple[str, str, Any]]:
     return [
+        ("POST", "/v1/runs/stop", self._handle_stop_admission),
+        ("POST", "/v1/filesystem-ownership", self._handle_filesystem_ownership),
         ("POST", "/v1/runs", self._handle_runs), ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
@@ -292,6 +300,11 @@ def _mark_shutdown_interrupted_runs(self, run_ids) -> None:
     """Publish the shutdown outcome before cooperative interruption can race teardown."""
     for run_id in run_ids:
         self._shutdown_interrupted_run_ids.add(run_id)
+        if self._run_statuses.get(run_id, {}).get("supervision_ready"):
+            self._stopping_run_ids.add(run_id)
+            self._set_run_status(run_id, "stopping", last_event="run.stopping")
+            request_job_stop(self, run_id)
+            continue
         self._set_run_status(
             run_id,
             "interrupted",
@@ -371,8 +384,16 @@ def _run_idempotency_scope(self, request: "web.Request", *, _api_server) -> str:
             "room_id", "home_install_id", "authority_gateway_id", "authority_epoch",
             "member_id", "target_install_id", "target_profile"))
     else:
-        parts = (_api_server._api_request_profile.get() or "default",
-                 self._expected_api_key() or "unauthenticated-test-listener")
+        from gateway.platforms.api_server_filesystem_ownership import worker_authority
+        from tools.terminal_tool import _get_env_config
+
+        profile = _api_server._api_request_profile.get()
+        with self._profile_scope(profile):
+            authority = worker_authority(_get_env_config())
+        # API key rotation must not strand runs admitted under the same enrolled
+        # control principal. Authentication is still checked on every request.
+        parts = (profile or "default", "filesystem-authority", authority["authority"], authority["principal"]) if authority else (
+            profile or "default", self._expected_api_key() or "unauthenticated-test-listener")
     return hashlib.sha256("\0".join(map(str, parts)).encode()).hexdigest()
 
 
@@ -400,7 +421,10 @@ def _owner_alive(owner_pid: int, owner_started: int) -> bool:
 def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
     """Hydrate a scoped run status and fail stale owners closed."""
     status = self._run_statuses.get(run_id)
-    if status is not None:
+    if status is not None and not (
+        status.get("supervision_ready") and status.get("status") not in TERMINAL_STATUSES
+        and run_id not in self._active_run_tasks
+    ):
         if run_id in self._run_idempotency_ids:
             scope = self._run_idempotency_scope(request)
             self._run_idempotency_store.extend_retention(scope, run_id, _room_retention_until(request))
@@ -416,6 +440,9 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
         status.update(
             status="interrupted", error="The gateway restarted before this run settled.",
             last_event="run.interrupted", updated_at=time.time())
+        if status.get("supervision_ready"):
+            status.update(status="stopping", supervision_recovery_required=True,
+                          last_event="run.recovering_jobs", error="Gateway restarted; owned jobs are being reconciled.")
         self._run_idempotency_store.update_status(run_id, status)
     self._run_statuses[run_id] = status
     self._run_idempotency_ids.add(run_id)
@@ -507,6 +534,7 @@ class _RunLaunch:
     browser_control_transport_family: Any
     turn_author: Optional[Dict[str, Any]] = None  # memory-attribution label only; grants nothing
     execution_context: Optional[ExecutionContext] = None
+    job_lifetime: Any = None
 
     @property
     def approval_session_key(self) -> str:
@@ -652,18 +680,17 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         v if isinstance(v, dict) else None for v in (
             (body.get("hosted_room_dispatch"), body.get("_room_execution_policy"))
             if isinstance(body, dict) else (None, None)))
-    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
-    if len(idempotency_key) > 255 or any(ord(ch) < 33 or ord(ch) > 126 for ch in idempotency_key):
+    from gateway.platforms.api_server_run_idempotency import request_identity
+    try:
+        idempotency_key, idempotency_fingerprint = request_identity(
+            body, gateway_session_key, request.headers.get("Idempotency-Key", ""))
+    except ValueError as exc:
         return _json_error(
-            _openai_error, "Idempotency-Key must be 1-255 visible ASCII characters",
+            _openai_error, str(exc),
             code="invalid_idempotency_key", status=400)
-    idempotency_scope = idempotency_fingerprint = ""
+    idempotency_scope = ""
     if idempotency_key:
         idempotency_scope = self._run_idempotency_scope(request)
-        idempotency_fingerprint = hashlib.sha256(json.dumps(
-            {"body": body, "gateway_session_key": gateway_session_key or ""},
-            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-        ).encode()).hexdigest()
     raw_input = body.get("input")
     if not raw_input:
         return _json_error(_openai_error, "Missing 'input' field", status=400)
@@ -703,6 +730,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         execution_context = capture_execution_context(body["execution_context"]) if "execution_context" in body else None
         if execution_context is not None and room_dispatch is not None:
             raise ExecutionContextError("execution_context cannot be combined with hosted_room_dispatch", status=400)
+        if waits_for_jobs(execution_context) and (not idempotency_key or not self._run_idempotency_store.durable):
+            raise ExecutionContextError("wait_for_jobs requires an Idempotency-Key and durable run storage", status=400)
     except ExecutionContextError as exc:
         return _json_error(_openai_error, str(exc), code="execution_context_mismatch", status=exc.status)
     # Enforce concurrency only for a genuinely new run.
@@ -747,7 +776,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
     initial_status = self._set_run_status(
         run_id, "queued", created_at=created_at, session_id=session_id, model=body.get("model", self._model_name),
-        **({"execution_context": execution_context.requested} if execution_context is not None else {}))
+        **({"execution_context": execution_context.requested} if execution_context is not None else {}),
+        **({"supervision": supervision_record(execution_context, run_id)} if waits_for_jobs(execution_context) else {}))
     if idempotency_key:
         outcome, record = self._run_idempotency_store.reserve(
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
@@ -827,7 +857,9 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
     effective_task_id = run.run_id if run.execution_context is not None else session_id or run.run_id
     # (token, reset) pairs unwound in the finally block; bound only once each step succeeds.
     resets: list[tuple[Any, Callable]] = []
-    with self._profile_scope(run.request_profile), bind_execution_context(run.execution_context):
+    failed = True
+    with (self._profile_scope(run.request_profile), bind_execution_context(run.execution_context),
+          bind_job_supervision(run.job_lifetime.binding if run.job_lifetime is not None else None)):
         try:
             # Contextvars, not process env: concurrent runs must not share identity.
             resets.append((set_current_session_key(run.approval_session_key), reset_current_session_key))
@@ -862,7 +894,12 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             r = agent.run_conversation(
                 user_message=run.user_message, conversation_history=run.conversation_history,
                 task_id=effective_task_id, **author_kwargs)
+            failed = isinstance(r, dict) and bool(r.get("failed") or r.get("interrupted"))
         finally:
+            if run.job_lifetime is not None:
+                self._set_run_status(run.run_id, "running", last_event="run.waiting_for_jobs")
+                run.job_lifetime.settle(lambda: failed or run.run_id in self._stopping_run_ids
+                                        or run.run_id in self._shutdown_interrupted_run_ids)
             # Clear ownership now so a later stop can't reap work this run left running.
             _api_server._clear_turn_process_ownership(agent)
             self._memory_sessions.checkin(agent)
@@ -995,9 +1032,40 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 if run_id in self._stopping_run_ids or run_id in self._shutdown_interrupted_run_ids:
                     _finish("cancelled")
                     return
-            agent = self._create_agent(
-                stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
-                interim_assistant_callback=_interim_cb, **run.agent_kwargs)
+            if waits_for_jobs(run.execution_context):
+                run.job_lifetime = await asyncio.to_thread(
+                    create_job_lifetime, run.execution_context, self._run_statuses[run_id]["supervision"])
+                if "ownership" in run.execution_context.requested:
+                    from tools.environments.filesystem_supervisor import OwnershipPending
+
+                    # Persist recovery intent before even a queued target request.
+                    run.job_lifetime.prepared = True
+                    self._run_job_lifetimes[run_id] = run.job_lifetime
+                    self._set_run_status(run_id, "queued", supervision_ready=True,
+                                         last_event="run.waiting_for_ownership")
+                    while True:
+                        if run_id in self._stopping_run_ids or run_id in self._shutdown_interrupted_run_ids:
+                            await settle_failed_run(run)
+                            _finish("cancelled")
+                            return
+                        try:
+                            await asyncio.to_thread(run.job_lifetime.supervisor.prepare)
+                            run.job_lifetime.binding.state_dir = run.job_lifetime.supervisor.runtime_dir
+                            break
+                        except OwnershipPending:
+                            await asyncio.sleep(1)
+                else:
+                    await asyncio.to_thread(run.job_lifetime.supervisor.prepare)
+                run.job_lifetime.prepared = True
+                self._run_job_lifetimes[run_id] = run.job_lifetime
+                current = self._set_run_status(run_id, "running", supervision_ready=True)
+                # Strict runs cannot launch tools unless recovery authority made
+                # it to durable storage. Do not use best-effort persistence here.
+                self._run_idempotency_store.update_status(run_id, current)
+            with bind_job_supervision(run.job_lifetime.binding if run.job_lifetime is not None else None):
+                agent = self._create_agent(
+                    stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
+                    interim_assistant_callback=_interim_cb, **run.agent_kwargs)
         self._active_run_agents[run_id] = agent
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
         execution = _submit_api_worker(
@@ -1022,6 +1090,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 _unregister_approval_notify(run.approval_session_key)
         if cancelled:
             raise asyncio.CancelledError
+        if run_id in self._stopping_run_ids and run.job_lifetime is not None:
+            _finish("cancelled")
+            return
         # Publish request metrics (daily counters + latency) with each completed run (#52323).
         self._record_api_metrics(usage, time.perf_counter() - _run_started_at)
         if not isinstance(result, dict):
@@ -1042,14 +1113,17 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                               else "raw_request" if any(requested.values()) else "global"))
             _finish(status, fields, output=result.get("final_response", ""), usage=usage, runtime=served_runtime)
     except asyncio.CancelledError:
+        await settle_failed_run(run)
         _finish("cancelled")
         raise
     except _api_server._ProviderAuthResolutionError as exc:
         # Same controlled provider-auth message the _run_agent() endpoints give.
         logger.warning("Provider resolution failed for run=%s: %s", run_id, exc)
+        await settle_failed_run(run)
         _finish("failed", error=exc.user_text())
     except Exception as exc:
         logger.exception("[api_server] run %s failed", run_id)
+        await settle_failed_run(run)
         _finish("failed", error=_redact_api_error_text(exc))
     finally:
         # The executor has settled; normal and cancellation cleanup are idempotent.
@@ -1057,6 +1131,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         with suppress(Exception):
             loop.call_soon(run.put_event, None)  # close after the queued events
         _retire_live_run(self, run_id)
+        self._run_job_lifetimes.pop(run_id, None)
+        if run.job_lifetime is not None:
+            run.job_lifetime.close()
 
 
 def _unregister_approval_notify(approval_session_key: Optional[str]) -> None:
@@ -1112,8 +1189,10 @@ def _load_owned_run(self, request, *, _api_server, permission: Optional[str], ac
 
 async def _handle_get_run(self, request: "web.Request", *, _api_server) -> "web.Response":
     """GET /v1/runs/{run_id} — return pollable run status for external UIs."""
-    _, status, _, _, err = _load_owned_run(
+    run_id, status, _, _, err = _load_owned_run(
         self, request, _api_server=_api_server, permission="status", active_fallback=True)
+    if err is None:
+        ensure_job_recovery(self, run_id, _api_server._api_request_profile.get())
     return err or web.json_response(status)
 
 
@@ -1313,14 +1392,22 @@ async def _handle_stop_run(self, request: "web.Request", *, _api_server) -> "web
         self, request, _api_server=_api_server, permission="stop", active_fallback=True)
     if err is not None:
         return err
+    return _stop_owned_run(self, request, run_id, status, agent, task, _api_server=_api_server)
+
+
+def _stop_owned_run(self, request, run_id, status, agent, task, *, _api_server):
+    _openai_error = _api_server._openai_error
     if status.get("status") in TERMINAL_STATUSES:
         return web.json_response(status)
+    ensure_job_recovery(self, run_id, _api_server._api_request_profile.get())
+    task = self._active_run_tasks.get(run_id, task)
     if agent is None and task is None:
         return _json_error(
             _openai_error, f"Run is not active in this gateway process: {run_id}",
             code="run_not_active", status=409)
     self._set_run_status(run_id, "stopping", last_event="run.stopping")
     self._stopping_run_ids.add(run_id)
+    request_job_stop(self, run_id)
     if agent is not None:
         with suppress(Exception):
             _api_server.request_hard_interrupt(agent, "Stop requested via API")

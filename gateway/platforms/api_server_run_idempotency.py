@@ -1,6 +1,7 @@
 """Durable idempotency reservations for API server runs."""
 
 import hmac
+import hashlib
 import json
 import logging
 import sqlite3
@@ -17,6 +18,17 @@ from hermes_cli.sqlite_util import add_column_if_missing
 logger = logging.getLogger("gateway.platforms.api_server")
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+
+
+def request_identity(body, session_key, raw_key: str) -> tuple[str, str]:
+    key = raw_key.strip()
+    if len(key) > 255 or any(ord(ch) < 33 or ord(ch) > 126 for ch in key):
+        raise ValueError("Idempotency-Key must be 1-255 visible ASCII characters")
+    fingerprint = hashlib.sha256(json.dumps(
+        {"body": body, "gateway_session_key": session_key or ""},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest() if key else ""
+    return key, fingerprint
 
 _SELECT_BY_KEY = (
     "SELECT fingerprint, run_id, status_json, owner_pid, owner_started, updated_at "
@@ -179,7 +191,11 @@ class RunIdempotencyStore:
         ).fetchall()
         for stale_scope, stale_key, stale_status in stale:
             try:
-                terminal = json.loads(stale_status).get("status") in TERMINAL_STATUSES
+                status = json.loads(stale_status)
+                # An offline owner can replay long after a supervised job ended.
+                # Keep its receipt: expiry must never admit that command again.
+                terminal = (status.get("status") in TERMINAL_STATUSES
+                            and (status.get("execution_context") or {}).get("lifetime") != "wait_for_jobs")
             except Exception:
                 terminal = False
             if terminal:

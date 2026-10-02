@@ -60,6 +60,8 @@ def main():
     execution_count = 0
     last_activity = time.time()
     while True:
+        if os.path.exists(os.path.join(KDIR, "stop")):
+            return
         pending = sorted(
             f for f in os.listdir(CELLS)
             if f.startswith("cell_req_") and f.endswith(".json")
@@ -123,6 +125,7 @@ class RemoteKernel:
     attached: int = 0
     # Owned by a live delegate_task child: exempt from LRU eviction (the child's teardown disposes it).
     pinned: bool = False
+    supervised_process: Any = None
 
     def sh(self, cmd: str, timeout: int = 15) -> str:
         return _sh(self.env, cmd, timeout)
@@ -131,6 +134,10 @@ class RemoteKernel:
         """Bounded liveness probe: kill -0 through the transport. Any transport
         failure counts as dead — a dropped ssh connection and a dead runner are
         indistinguishable from here, and both have the same correct answer (respawn)."""
+        if self.supervised_process is not None:
+            process = self.supervised_process
+            # Unknown control state raises: it must not respawn an admitted cell.
+            return process.supervisor.main_exit_code(process.job) is None
         try:
             return "ALIVE" in self.sh(f"kill -0 {shlex.quote(self.pid)} 2>/dev/null && echo ALIVE")
         except Exception:
@@ -138,6 +145,9 @@ class RemoteKernel:
 
     def kill(self) -> None:
         """Best-effort kill of the runner and its subprocesses, then rm -rf."""
+        if self.supervised_process is not None:
+            self.supervised_process.kill()
+            return  # Run state remains until all descendants have settled.
         q_pid = shlex.quote(self.pid)
         for cmd, failure in (
             # Kill the runner's children if the shell gave it a group, then the PID itself.
@@ -154,7 +164,10 @@ class RemoteKernel:
 def _kernel_key(owner: str, env_type: str, task_env_id: str, sandbox_tools: frozenset) -> Tuple:
     """The hermes_tools stub module is generated from ``sandbox_tools`` once, at spawn, so a kernel
     is only reusable by calls with the SAME tool set; a different set gets its own kernel."""
-    return (owner, "remote", env_type, task_env_id, tuple(sorted(sandbox_tools)))
+    from tools.environments.supervised_execution import current_job_supervision
+    binding = current_job_supervision()
+    key = (owner, "remote", env_type, task_env_id, tuple(sorted(sandbox_tools)))
+    return (*key, binding.state_dir) if binding is not None else key
 
 
 # Registry + lock shared-shape with code_kernel; teardown runs outside the lock.
@@ -207,6 +220,10 @@ atexit.register(shutdown_all_remote_kernels)
 def _spawn_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
                          sandbox_tools: frozenset, *, idle_exit: int) -> Optional[RemoteKernel]:
     """Start a detached kernel runner on the remote. None on failure (dir removed)."""
+    from tools.environments.supervised_execution import current_job_supervision
+    if binding := current_job_supervision():
+        from tools.code_kernel_supervised import spawn_supervised_kernel
+        return spawn_supervised_kernel(binding, env, env_type, owner, task_env_id, sandbox_tools, idle_exit)
     from tools.code_execution_rpc import _execute_checked, _private_dirs_cmd
     from tools.code_execution_tool import (
         MAX_STDOUT_BYTES, _ship_file_to_remote, _env_temp_dir,
@@ -329,6 +346,12 @@ def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int) -> Tuple[str
                 # A leftover result file is harmless (seq is monotonic).
                 logger.debug("remote kernel: cell result cleanup failed", exc_info=True)
             return status, payload
+        if kernel.supervised_process is not None:
+            try:
+                if not kernel.is_alive():
+                    return "interrupted", {}
+            except RuntimeError:
+                pass  # A lost control channel cannot prove the cell stopped.
         time.sleep(_CELL_POLL_INTERVAL)
     return "timeout", {}
 
@@ -397,18 +420,20 @@ def _run_attached_cell(kernel: RemoteKernel, key: Tuple, code: str, *, env, task
         raise
     finally:
         stop_event.set()
-        rpc_thread.join(timeout=5)
+        rpc_thread.join(timeout=None if kernel.supervised_process is not None else 5)
     kernel_info: Dict[str, Any] = {"reused": reused, "remote": True}
     result: Dict[str, Any] = {
         "status": "error", "stdout": cell_payload.get("stdout", ""), "stderr": cell_payload.get("stderr", ""),
         "traceback": cell_payload.get("traceback", ""), "tool_calls_made": tool_call_counter[0], "kernel": kernel_info,
         "tool_errors": tool_errors_since(tool_call_log),
     }
-    if cell_status in ("timeout", "protocol-error", "no-result"):
+    if cell_status in ("timeout", "protocol-error", "no-result", "interrupted"):
         # No safe way to interrupt one cell in place (same contract as local): kill, report, respawn.
         _REGISTRY.discard(key, kernel)
         if cell_status == "timeout":
             result["status"] = "timeout"
+        elif cell_status == "interrupted":
+            result["status"] = "interrupted"
         kernel_info.update(ended=True, state_lost=True, note=(
             "Cell timed out; the remote session kernel was killed and its state was lost. The next call "
             "starts a fresh kernel." if cell_status == "timeout"

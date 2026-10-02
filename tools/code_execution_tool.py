@@ -665,9 +665,11 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
     timeout, max_tool_calls = _cfg.get("timeout", DEFAULT_TIMEOUT), _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
     sandbox_tools, effective_task_id = _sandbox_tools_for(enabled_tools), task_id or "default"
     env, env_type = _get_or_create_env(effective_task_id)
+    from tools.environments.supervised_execution import current_job_supervision
+    supervised = current_job_supervision() is not None
     exec_start = time.monotonic()
     try:
-        py_check = env.execute("command -v python3 >/dev/null 2>&1 && echo OK", cwd="/", timeout=15)
+        py_check = env.execute("command -v python3 >/dev/null 2>&1 && echo OK", cwd="/", timeout=15) if env_type != "local" else {"output": "OK"}
         if "OK" not in py_check.get("output", ""):
             return _error_result(f"Python 3 is not available in the {env_type} terminal "
                                  "environment. Install Python to use execute_code with remote backends.")
@@ -686,6 +688,8 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
                 idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
             )
         except Exception:
+            if supervised:
+                raise  # Lost acknowledgement cannot authorize a second execution.
             logger.warning("remote session-kernel path failed; falling back to per-call", exc_info=True)
             kernel_result = None
         if kernel_result is not None:
@@ -779,7 +783,8 @@ def execute_code(
     if _guard.get("user_approved"):
         from tools.interrupt import clear_current_thread_interrupt
         clear_current_thread_interrupt()
-    if env_type != "local":
+    from tools.environments.supervised_execution import current_job_supervision
+    if env_type != "local" or current_job_supervision() is not None:
         return _execute_remote(code, task_id, enabled_tools, reset=bool(reset))
     from tools.interrupt import is_interrupted as _is_interrupted
     # Session kernels are always on locally (one interpreter per conversation); the guards above

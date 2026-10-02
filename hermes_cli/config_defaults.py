@@ -335,6 +335,8 @@ DEFAULT_CONFIG = {
         # SSH worker state, independent of the login user's personal Hermes install.
         # Empty preserves <remote login HOME>/.hermes; otherwise an absolute remote path.
         "ssh_hermes_home": "",
+        # Optional host-local target authority. Enrolled separately by the operator.
+        "filesystem_authority": {},
         # Extra files sourced in the login shell when building the per-session env snapshot — for
         # nvm/pyenv/asdf/PATH entries registered by files a bash login shell skips (~/.bashrc,
         # ~/.zshrc, ~/.zprofile). Supports ~ and ${VAR}; missing files skipped. When empty and the

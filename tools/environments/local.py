@@ -932,13 +932,23 @@ class LocalEnvironment(BaseEnvironment):
         self.cwd = safe_cwd
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
-                  stdin_data: str | None = None) -> subprocess.Popen:
+                  stdin_data: str | None = None, wait_for_descendants: bool = False) -> subprocess.Popen:
+        import shlex
+        from tools.environments.supervised_execution import (
+            SupervisedProcessHandle, current_job_supervision, local_supervisor)
+
         bash = _find_bash()
         # Login invocations (init_session's env snapshot) source the user's rc /
         # custom init files so nvm/asdf/pyenv land on PATH in the snapshot.
         if login:
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
+        if binding := current_job_supervision():
+            run_env = _make_run_env(self.env)
+            supervisor = local_supervisor(binding, run_env)
+            job = supervisor.start(shlex.join(args), cwd=self.cwd,
+                                   environment_names=tuple(run_env), stdin=stdin_data)
+            return SupervisedProcessHandle(supervisor, job, wait_for_descendants=wait_for_descendants)
         self._recover_cwd()
         proc = subprocess.Popen(
             args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
@@ -955,6 +965,8 @@ class LocalEnvironment(BaseEnvironment):
 
     def _kill_process(self, proc):
         """Kill the entire process group (all children)."""
+        if proc.pid is None:  # Target-side ProcessHandle; never signal a target PID locally.
+            return proc.kill()
         try:
             (_kill_process_windows if _IS_WINDOWS else _kill_process_group_posix)(proc)
         except OSError:  # ProcessLookupError / PermissionError included
@@ -963,6 +975,8 @@ class LocalEnvironment(BaseEnvironment):
 
     def _force_kill_process(self, proc):
         """SIGKILL the whole group with no TERM grace or wait: the caller os._exit()s next."""
+        if proc.pid is None:
+            return proc.kill()
         if _IS_WINDOWS:  # already a forced tree kill
             return self._kill_process(proc)
         with contextlib.suppress(OSError):

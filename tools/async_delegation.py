@@ -793,7 +793,8 @@ def _dispatch_admitted(
     # reservation too: the stall monitor may finalize its registry record before it really exits.
     retirement.acquire()
     try:
-        future = executor.submit(propagate_context_to_thread(_worker))
+        from tools.environments.supervised_execution import submit_owned_worker
+        future = submit_owned_worker(executor, propagate_context_to_thread(_worker), interrupt=interrupt_fn)
         future.add_done_callback(lambda _: retirement.release())
     except Exception as exc:  # pragma: no cover — pool submit failure is rare
         retirement.release()

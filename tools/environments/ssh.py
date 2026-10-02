@@ -284,16 +284,23 @@ class SSHEnvironment(BaseEnvironment):
             self._sync_manager.sync()  # rate-limited internally
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
-                  stdin_data: str | None = None) -> subprocess.Popen:
+                  stdin_data: str | None = None, wait_for_descendants: bool = False) -> subprocess.Popen:
         """Forward the passthrough allowlist (skill ``required_environment_variables`` +
         ``terminal.env_passthrough``) the way docker does: ``SendEnv`` carries the names, the ssh
         client's env carries the values, so secrets never enter the remote ``bash -c`` argv. The
         remote sshd must ``AcceptEnv`` them (#14091). Profile-scoped names missing from the active
         scope are unset remotely so a shared host cannot serve another profile's value."""
         values, unset_names = resolve_passthrough_env(hermes_env_loader=_load_hermes_env_vars)
+        from tools.environments.supervised_execution import (
+            SupervisedProcessHandle, current_job_supervision, ssh_supervisor)
         command = prepend_unset(cmd_string, unset_names)
         if self._configured_hermes_home:
             command = f"export HERMES_HOME={shlex.quote(self._remote_hermes_home)}; {command}"
+        if binding := current_job_supervision():
+            supervisor = ssh_supervisor(binding, self, values)
+            job = supervisor.start(shlex.join(["bash", *(["-l"] if login else []), "-c", command]),
+                                   cwd=self.cwd, environment_names=("PATH", "HOME", *values), stdin=stdin_data)
+            return SupervisedProcessHandle(supervisor, job, wait_for_descendants=wait_for_descendants)
         cmd = self._build_ssh_command(send_env=values) + bash_argv(shlex.quote(command), login)
         client_env = client_env_with(values)
         return _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)

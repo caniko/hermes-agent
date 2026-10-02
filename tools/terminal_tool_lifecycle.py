@@ -202,7 +202,10 @@ def ensure_task_env(task_id: Optional[str] = None):
     )
     config = _get_env_config()
     env_type = config["env_type"]
-    if env_type == "local":
+    from tools.environments.supervised_execution import current_job_supervision
+
+    binding = current_job_supervision()
+    if env_type == "local" and not (binding is not None and binding.supervisor is not None):
         return None
 
     effective_task_id = _resolve_container_task_id(task_id)

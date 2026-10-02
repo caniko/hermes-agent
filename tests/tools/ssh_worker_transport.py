@@ -7,6 +7,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import time
 
 import pytest
@@ -28,10 +29,13 @@ def openssh_transport(root, login_home, monkeypatch):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     user = pwd.getpwuid(os.getuid()).pw_name
+    fixture_path = os.path.dirname(sys.executable) + ':' + os.environ['PATH']
+    (login_home / ".bash_profile").write_text(f"export PATH={shlex.quote(fixture_path)}\n")
     command = root / "command"
     command.write_text(
         f"#!{bash}\nexport HOME={shlex.quote(str(login_home))}\n"
-        f"export PATH={shlex.quote(os.environ['PATH'])}\n"
+        f"export PATH={shlex.quote(fixture_path)}\n"
+        "export __ETC_PROFILE_SOURCED=1\n"
         f"exec {shlex.quote(bash)} --noprofile --norc -c \"$SSH_ORIGINAL_COMMAND\"\n")
     command.chmod(0o700)
     config = root / "sshd_config"
