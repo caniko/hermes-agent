@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestClient, TestServer
 
