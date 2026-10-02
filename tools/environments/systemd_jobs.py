@@ -43,7 +43,9 @@ class SystemdJobSupervisor:
         prelude = ('set -eu; export XDG_RUNTIME_DIR="/run/user/$(id -u)"; '
                    'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"; ')
         try:
-            result = self.execute(prelude + script, stdin)
+            # None makes subprocess transports inherit the gateway/backdoor
+            # input. Control commands and staged job input must receive EOF.
+            result = self.execute(prelude + script, "" if stdin is None else stdin)
         except (OSError, subprocess.SubprocessError) as exc:
             raise SupervisionError("target supervisor is unreachable") from exc
         if result.returncode:

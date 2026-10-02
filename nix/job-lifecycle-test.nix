@@ -38,6 +38,7 @@ in
       worker.succeed("cp -R ${source}/tests /var/lib/hermes-qualification/; chmod -R u+w /var/lib/hermes-qualification/tests")
       status, output = worker.execute("cd /var/lib/hermes-qualification && XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus ${python} -m pytest -q --tb=short -o addopts= -o faulthandler_timeout=30 --junitxml=/var/lib/hermes-qualification/lifecycle.xml "
           "tests/tools/test_target_job_supervision.py "
+          "tests/tools/test_supervision_control_stdin.py "
           "tests/tools/test_filesystem_claims.py "
           "tests/tools/test_filesystem_authority.py "
           "tests/tools/test_filesystem_authority_system.py "

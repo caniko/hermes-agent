@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 REQUIRED = {
+    "test_supervisor_supplies_eof_without_consuming_parent_stdin",
     "test_supervisor_waits_for_daemon_and_recovers_stop_fence[local]",
     "test_supervisor_waits_for_daemon_and_recovers_stop_fence[ssh]",
     "test_systemd_submission_delayed_past_seal_cannot_execute_work[local]",
