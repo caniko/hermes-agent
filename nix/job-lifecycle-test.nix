@@ -41,9 +41,9 @@ in
           "tests/gateway/test_api_server_job_recovery.py "
           "tests/gateway/test_api_server_filesystem_ownership.py", timeout=900)
       if worker.execute("test -s /var/lib/hermes-qualification/lifecycle.xml")[0] == 0:
-          worker.copy_from_vm("/var/lib/hermes-qualification/lifecycle.xml")
+          worker.copy_from_machine("/var/lib/hermes-qualification/lifecycle.xml")
       assert status == 0, output
       worker.succeed("${python} ${source}/scripts/qualify-job-lifecycle.py /var/lib/hermes-qualification/lifecycle.xml /etc/hermes-qualification-source.json /var/lib/hermes-qualification/receipt.json")
-      worker.copy_from_vm("/var/lib/hermes-qualification/receipt.json")
+      worker.copy_from_machine("/var/lib/hermes-qualification/receipt.json")
     '';
   }
