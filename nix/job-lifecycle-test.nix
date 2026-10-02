@@ -11,6 +11,10 @@ in
         diskSize = 16384;
       };
       environment.systemPackages = with pkgs; [bash coreutils findutils git openssh systemd util-linux];
+      # The disposable transport starts its own loopback sshd. The NixOS module
+      # supplies OpenSSH's privilege-separation accounts and runtime directory.
+      services.openssh.enable = true;
+      services.openssh.openFirewall = false;
       environment.etc."hermes-qualification-source.json".text = builtins.toJSON {
         inherit revision;
         environment = toString testPackage.hermesVenv;
@@ -28,10 +32,11 @@ in
       worker.succeed("loginctl enable-linger root; systemctl start user@0.service")
       worker.wait_for_unit("user@0.service")
       worker.succeed("test -S /run/user/0/bus")
+      worker.succeed("getent passwd sshd")
       # Only test fixtures are copied. Production imports must resolve from the
       # built candidate venv, never from an editable source checkout.
       worker.succeed("cp -R ${source}/tests /var/lib/hermes-qualification/; chmod -R u+w /var/lib/hermes-qualification/tests")
-      status, output = worker.execute("cd /var/lib/hermes-qualification && XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus ${python} -m pytest -q -o addopts= --junitxml=/var/lib/hermes-qualification/lifecycle.xml "
+      status, output = worker.execute("cd /var/lib/hermes-qualification && XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus ${python} -m pytest -q --tb=short -o addopts= -o faulthandler_timeout=30 --junitxml=/var/lib/hermes-qualification/lifecycle.xml "
           "tests/tools/test_target_job_supervision.py "
           "tests/tools/test_filesystem_claims.py "
           "tests/tools/test_filesystem_authority.py "
