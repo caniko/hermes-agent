@@ -1,0 +1,25 @@
+[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+runner = "ubuntu-24.04"
+nix_builds = [".#checks.x86_64-linux.target-job-lifecycle"]
+
+[ci.nix_build]
+only = true
+timeout_minutes = 120
+max_parallel = 1
+max_jobs = 1
+cores = 2
+kvm = true
+capture_results = true
+artifact_retention_days = 30
+extra_setup = [
+  "python3 scripts/test-qualify-job-lifecycle.py",
+  "nix run github:caniko/simit/362369c48b214d13340dffc2f858ab641adcd839 -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
+]
+post_build = ["python3 scripts/qualify-job-lifecycle.py retain"]
+
+[release.artifacts]
+substituters = ["https://cache.nixos.org"]
+trusted_public_keys = ["cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="]
