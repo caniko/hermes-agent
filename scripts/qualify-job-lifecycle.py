@@ -15,6 +15,8 @@ REQUIRED = {
     "test_supervisor_supplies_eof_without_consuming_parent_stdin",
     "test_supervisor_waits_for_daemon_and_recovers_stop_fence[local]",
     "test_supervisor_waits_for_daemon_and_recovers_stop_fence[ssh]",
+    "test_stop_waits_for_slow_jobs_together_and_settles_every_cgroup[local]",
+    "test_stop_waits_for_slow_jobs_together_and_settles_every_cgroup[ssh]",
     "test_systemd_submission_delayed_past_seal_cannot_execute_work[local]",
     "test_systemd_submission_delayed_past_seal_cannot_execute_work[ssh]",
     "test_two_gateways_park_before_tools_and_keep_key_rotation_identity[local]",

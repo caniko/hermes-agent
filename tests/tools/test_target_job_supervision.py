@@ -107,6 +107,34 @@ def test_supervisor_waits_for_daemon_and_recovers_stop_fence(tmp_path, target):
 
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("backend", ["local", "ssh"])
+def test_stop_waits_for_slow_jobs_together_and_settles_every_cgroup(tmp_path, target):
+    from concurrent.futures import ThreadPoolExecutor
+    from tools.environments.job_supervision import JobState
+    from tools.environments.systemd_jobs import SystemdJobSupervisor
+
+    supervisor = SystemdJobSupervisor(target, str(tmp_path / "state"))
+    supervisor.prepare()
+    jobs = []
+    try:
+        for index in range(4):
+            ready = tmp_path / f"ready-{index}"
+            # Each parent ignores TERM, forcing systemd's existing five-second
+            # cgroup grace. Four serial waits cannot fit the same stop deadline.
+            jobs.append(supervisor.start(
+                "trap '' TERM; touch " + shlex.quote(str(ready)) + "; while :; do sleep .1; done",
+                cwd=str(tmp_path), environment_names=("PATH",)))
+            wait_for(ready.exists)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            stopping = pool.submit(supervisor.stop)
+            stopping.result(timeout=15)
+        assert all(supervisor.inspect(job) is JobState.SETTLED for job in jobs)
+        assert supervisor.settled()
+    finally:
+        supervisor.stop()
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("backend", ["local", "ssh"])
 def test_systemd_submission_delayed_past_seal_cannot_execute_work(tmp_path, target):
     from tools.environments.job_supervision import JobState, SupervisionError
     from tools.environments.systemd_jobs import SystemdJobSupervisor

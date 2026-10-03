@@ -213,29 +213,35 @@ class SystemdJobSupervisor:
 
     def stop(self) -> None:
         self.seal()
-        for job in self.jobs():
-            self.stop_job(job)
+        self._stop_jobs(self.jobs())
 
     def stop_job(self, job: JobReceipt) -> None:
-        folder, unit = self._job(job)
+        self._stop_jobs([job])
+
+    def _stop_jobs(self, jobs: list[JobReceipt]) -> None:
+        if not jobs:
+            return
+        folders, units = zip(*(self._job(job) for job in jobs))
         # KillMode=mixed gives the original parent TERM first, then systemd
-        # kills its remaining cgroup after the grace period. The gate settles
-        # any in-flight submission before recording the stop tombstone.
+        # kills its remaining cgroup after the grace period. Fence every receipt
+        # before waiting on the manager, which stops the units together instead
+        # of paying each job's grace and control round trips serially.
+        tombstones = [self.state_dir + '/fence/' + job.id + '.stopped' for job in jobs]
         try:
             self._run(self._gate(f"test -f {shlex.quote(self.state_dir + '/fence/boot')}; "
-                                   f"mkdir -p -- {shlex.quote(folder)}; touch {shlex.quote(self.state_dir + '/fence/' + job.id + '.stopped')}; "
-                                   f"systemctl {self._manager} stop {unit}"))
+                                   f"mkdir -p -- {shlex.join(folders)}; touch -- {shlex.join(tombstones)}; "
+                                   f"systemctl {self._manager} stop {shlex.join(units)}"))
         except SupervisionError:
-            if self.inspect(job) is not JobState.SETTLED:
+            if not all(self.inspect(job) is JobState.SETTLED for job in jobs):
                 raise
-        if self.inspect(job) is not JobState.SETTLED:
+        if not all(self.inspect(job) is JobState.SETTLED for job in jobs):
             raise SupervisionError("target job has not settled")
         # Failed transient units are retained by the manager. Retire only this
-        # verified-empty unit; a collected unit may already have disappeared.
+        # verified-empty set; collected units may already have disappeared.
         try:
-            self._run(f"systemctl {self._manager} reset-failed {unit}")
+            self._run(f"systemctl {self._manager} reset-failed {shlex.join(units)}")
         except SupervisionError:
-            if self.inspect(job) is not JobState.SETTLED:
+            if not all(self.inspect(job) is JobState.SETTLED for job in jobs):
                 raise
 
     def settled(self) -> bool:
