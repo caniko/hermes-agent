@@ -36,7 +36,10 @@ in
       # Only test fixtures are copied. Production imports must resolve from the
       # built candidate venv, never from an editable source checkout.
       worker.succeed("cp -R ${source}/tests /var/lib/hermes-qualification/; chmod -R u+w /var/lib/hermes-qualification/tests")
-      status, output = worker.execute("cd /var/lib/hermes-qualification && XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus ${python} -m pytest -q --tb=short -o addopts= -o faulthandler_timeout=30 --junitxml=/var/lib/hermes-qualification/lifecycle.xml "
+      # Mirror bounded qualification output to the VM console as it happens.
+      # A driver timeout otherwise retains only pytest dots, losing the failing
+      # case names and the assertion that preceded blocked teardown.
+      status, output = worker.execute("cd /var/lib/hermes-qualification && set -o pipefail && XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus ${python} -m pytest -vv --tb=short -o addopts= -p tests._fixtures.qualification_diagnostics -o faulthandler_timeout=30 --junitxml=/var/lib/hermes-qualification/lifecycle.xml "
           "tests/tools/test_target_job_supervision.py "
           "tests/tools/test_supervision_control_stdin.py "
           "tests/tools/test_supervision_stop_fence.py "
@@ -47,7 +50,9 @@ in
           "tests/gateway/test_api_server_execution_context.py "
           "tests/gateway/test_api_server_run_admission.py "
           "tests/gateway/test_api_server_job_recovery.py "
-          "tests/gateway/test_api_server_filesystem_ownership.py", timeout=900)
+          "tests/gateway/test_api_server_filesystem_ownership.py "
+          "2>&1 | tee /var/lib/hermes-qualification/pytest.txt /dev/console", timeout=900)
+      worker.copy_from_machine("/var/lib/hermes-qualification/pytest.txt")
       if worker.execute("test -s /var/lib/hermes-qualification/lifecycle.xml")[0] == 0:
           worker.copy_from_machine("/var/lib/hermes-qualification/lifecycle.xml")
       assert status == 0, output
