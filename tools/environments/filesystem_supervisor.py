@@ -103,6 +103,17 @@ class FilesystemSupervisor:
                 self._observations[key] = cached
             return cached[1]
 
+    def observe(self, job, offset=0):
+        # Streaming callers carry their offset forward and consume the whole
+        # frame once. Do not hold the shared legacy-cache lock over this RPC:
+        # a kernel liveness probe must not serialize every other job's reader.
+        result = self._request("observe", job=job.id, offset=offset)
+        try:
+            return (JobState(result["state"]), result["exit_code"],
+                    base64.b64decode(result["output"], validate=True))
+        except (KeyError, ValueError) as exc:
+            raise SupervisionError("target job observation is unavailable") from exc
+
     def inspect(self, job):
         try:
             return JobState(self._observe(job)["state"])

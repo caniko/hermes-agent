@@ -128,9 +128,9 @@ for their cgroup. Transport loss keeps the handle live and the receipt intact.
         try:
             while True:
                 try:
-                    code = self.supervisor.main_exit_code(self.job)
-                    settled = self.supervisor.inspect(self.job) is JobState.SETTLED
-                    while chunk := self.supervisor.read_output(self.job, offset):
+                    state, code, chunk = self.supervisor.observe(self.job, offset)
+                    settled = state is JobState.SETTLED
+                    if chunk:
                         offset += len(chunk)
                         if output_open:
                             try:
@@ -139,6 +139,10 @@ for their cgroup. Transport loss keeps the handle live and the receipt intact.
                                     view = view[os.write(self._write_fd, view):]
                             except BrokenPipeError:
                                 output_open = False
+                    if len(chunk) == 65536:
+                        # A full bounded frame may have a tail. Query it before
+                        # publishing completion, including after the main exits.
+                        continue
                     if code is not None and (not self.wait_for_descendants or settled):
                         self.returncode = code
                         return

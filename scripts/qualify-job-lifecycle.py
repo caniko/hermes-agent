@@ -1,5 +1,6 @@
 """Require completed native lifecycle cases without skipped or failed proof."""
 
+import base64
 import hashlib
 import json
 import os
@@ -27,6 +28,91 @@ REQUIRED = {
     "test_system_provider_preserves_uid_and_confines_same_uid_workers",
 }
 
+DIAGNOSTIC_MARKER = "HERMES_LIFECYCLE_DIAGNOSTIC_V1 "
+DIAGNOSTIC_FILES = {"lifecycle.xml", "source.json"}
+MAX_DIAGNOSTIC_BYTES = 1024 * 1024
+CHUNK_BYTES = 1024
+
+
+def emit_diagnostics(report, source):
+    """Keep completed failed-suite bytes in the retained Nix log before assertion."""
+    for name, path in [("lifecycle.xml", report), ("source.json", source)]:
+        raw = path.read_bytes()
+        if not raw or len(raw) > MAX_DIAGNOSTIC_BYTES:
+            raise ValueError("Lifecycle diagnostic is empty or exceeds the byte bound")
+        encoded = base64.b64encode(raw).decode("ascii")
+        chunks = [encoded[i:i + CHUNK_BYTES] for i in range(0, len(encoded), CHUNK_BYTES)]
+        digest = hashlib.sha256(raw).hexdigest()
+        for index, chunk in enumerate(chunks):
+            print(DIAGNOSTIC_MARKER + json.dumps({
+                "file": name, "sha256": digest, "bytes": len(raw),
+                "index": index, "chunks": len(chunks), "data": chunk,
+            }, separators=(",", ":")), flush=True)
+
+
+def recover_diagnostics(log, revision):
+    """Reject missing, mixed or corrupt frames; never issue qualification proof."""
+    files = {}
+    for line in log.splitlines():
+        if DIAGNOSTIC_MARKER not in line:
+            continue
+        frame = json.loads(line.split(DIAGNOSTIC_MARKER, 1)[1])
+        name = frame["file"]
+        if name not in DIAGNOSTIC_FILES:
+            raise ValueError("Unexpected lifecycle diagnostic file")
+        if (type(frame["bytes"]) is not int or not 0 < frame["bytes"] <= MAX_DIAGNOSTIC_BYTES
+                or type(frame["chunks"]) is not int or not 0 < frame["chunks"] <= 1366
+                or type(frame["index"]) is not int or not 0 <= frame["index"] < frame["chunks"]
+                or not isinstance(frame["data"], str) or len(frame["data"]) > CHUNK_BYTES
+                or not re.fullmatch(r"[0-9a-f]{64}", frame["sha256"])):
+            raise ValueError("Invalid lifecycle diagnostic frame")
+        identity = (frame["sha256"], frame["bytes"], frame["chunks"])
+        entry = files.setdefault(name, {"identity": identity, "chunks": {}})
+        if entry["identity"] != identity:
+            raise ValueError("Mixed lifecycle diagnostic streams")
+        prior = entry["chunks"].setdefault(frame["index"], frame["data"])
+        if prior != frame["data"]:
+            raise ValueError("Conflicting lifecycle diagnostic chunk")
+    if set(files) != DIAGNOSTIC_FILES:
+        raise ValueError("Missing lifecycle diagnostic files")
+    recovered = {}
+    for name, entry in files.items():
+        digest, size, count = entry["identity"]
+        if len(entry["chunks"]) != count:
+            raise ValueError("Incomplete lifecycle diagnostic chunks")
+        raw = base64.b64decode("".join(entry["chunks"][i] for i in range(count)), validate=True)
+        if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError("Lifecycle diagnostic digest mismatch")
+        recovered[name] = raw
+    source = json.loads(recovered["source.json"])
+    if not re.fullmatch(r"[0-9a-f]{40}", revision) or source.get("revision") != revision:
+        raise ValueError("Lifecycle diagnostic checkout mismatch")
+    ET.fromstring(recovered["lifecycle.xml"])
+    return recovered
+
+
+def retain_diagnostics():
+    location = os.environ.get("SIMIT_NIX_BUILD_RESULTS")
+    if not location:
+        return  # Setup may fail before the evidence directory is prepared.
+    evidence = Path(location)
+    log_path = evidence / "build.log"
+    if not log_path.exists():
+        return
+    log = log_path.read_text()
+    if DIAGNOSTIC_MARKER not in log:
+        return  # A timed-out or unstarted suite is not a completed report.
+    revision = (evidence / "revision").read_text().strip()
+    recovered = recover_diagnostics(log, revision)
+    diagnostic = {
+        "schemaVersion": 1, "scope": "hermes-lifecycle-diagnostics",
+        "revision": revision, "qualified": False,
+        "files": {name: hashlib.sha256(raw).hexdigest() for name, raw in recovered.items()},
+    }
+    for name, raw in recovered.items():
+        (evidence / name).write_bytes(raw)
+    (evidence / "diagnostics.json").write_text(json.dumps(diagnostic, indent=2) + "\n")
+
 
 def qualify(report, provenance):
     raw = report.read_bytes()
@@ -35,7 +121,12 @@ def qualify(report, provenance):
     names = {case.get("name") for case in cases}
     missing = REQUIRED - names
     unsuccessful = [case.get("name") for case in cases
-                    if any(case.find(tag) is not None for tag in ["failure", "error", "skipped"])]
+                    if any(case.find(tag) is not None for tag in [
+                        "failure", "error", "skipped", "rerunFailure", "rerunError", "flakyFailure", "flakyError",
+                    ])]
+    identities = [(case.get("classname"), case.get("name")) for case in cases]
+    if len(identities) != len(set(identities)):
+        raise ValueError("Lifecycle proof contains duplicate or retried cases")
     suite_errors = root.findall(".//testsuite/error")
     if missing or unsuccessful or suite_errors:
         raise ValueError(f"Incomplete lifecycle proof: missing={sorted(missing)}, unsuccessful={unsuccessful}")
@@ -75,6 +166,11 @@ def retain():
 if __name__ == "__main__":
     if sys.argv[1:] == ["retain"]:
         retain()
+    elif sys.argv[1:] == ["retain-diagnostics"]:
+        retain_diagnostics()
+    elif sys.argv[1:2] == ["emit-diagnostics"]:
+        report, source = map(Path, sys.argv[2:])
+        emit_diagnostics(report, source)
     else:
         report, source, destination = map(Path, sys.argv[1:])
         receipt = qualify(report, json.loads(source.read_text()))
