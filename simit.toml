@@ -13,7 +13,7 @@ max_jobs = 1
 cores = 2
 kvm = true
 capture_results = true
-artifact_retention_days = 30
+artifact_retention_days = 31
 extra_env = { NIX_CONFIG = "log-lines = 3000" }
 extra_setup = [
   "python3 scripts/test-qualify-job-lifecycle.py",
