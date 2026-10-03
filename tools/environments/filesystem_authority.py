@@ -33,7 +33,7 @@ class FilesystemAuthority:
         stat = self.state.stat()
         if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
             raise ValueError("authority state must be private and owned by the service user")
-        self._anchor = open(self.state / "authority.lock", "a")
+        self._anchor = open(self.state / "authority.lock", "a", encoding="utf-8")
         try:
             fcntl.flock(self._anchor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BaseException:
@@ -138,12 +138,12 @@ class FilesystemAuthority:
         query = "SELECT id FROM jobs WHERE claim=?" + (" AND settled=0" if unsettled else "")
         return [JobReceipt(item[0]) for item in self.store.db.execute(query, (row["id"],))]
 
-    def _retire_job(self, row, job, supervisor):
+    def _retire_job(self, row, job, supervisor, *, observed_exit_code=None):
         recorded = self.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=? AND claim=?",
                                         (job.id, row["id"])).fetchone()
         if recorded["settled"]:
             return recorded["exit_code"]
-        code = recorded["exit_code"]
+        code = recorded["exit_code"] if recorded["exit_code"] is not None else observed_exit_code
         if code is None:
             try:
                 code = supervisor.main_exit_code(job)
@@ -175,7 +175,7 @@ class FilesystemAuthority:
         try:
             with self.store.transaction():
                 self.store.db.execute("INSERT INTO execution VALUES (?,?,?,?)",
-                                      (row["id"], policy["execution_uid"], Path("/proc/sys/kernel/random/boot_id").read_text(),
+                                      (row["id"], policy["execution_uid"], Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8"),
                                        json.dumps(policy.get("environment", {}))))
             self.store.validate_roots(row["id"])
             fds = self._root_fds.setdefault(row["id"], [])
@@ -316,17 +316,19 @@ class FilesystemAuthority:
                 raise PermissionError("job does not belong to this ownership request")
             supervisor = self._supervisor(row)
             if op == "observe":
-                recorded = self.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=?", (job.id,)).fetchone()
-                state = JobState.SETTLED if recorded["settled"] else supervisor.inspect(job)
-                code = recorded["exit_code"]
-                if code is None and state is not JobState.UNKNOWN:
-                    code = supervisor.main_exit_code(job)
                 offset = message.get("offset", 0)
                 if type(offset) is not int or not 0 <= offset <= 2**63 - 1:
                     raise ValueError("invalid output offset")
-                data = supervisor.read_output(job, offset)
+                recorded = self.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=?", (job.id,)).fetchone()
+                if recorded["settled"]:
+                    state, code = JobState.SETTLED, recorded["exit_code"]
+                    data = supervisor.read_output(job, offset)
+                else:
+                    state, code, data = supervisor.observe(job, offset)
+                    if recorded["exit_code"] is not None:
+                        code = recorded["exit_code"]
                 if state is JobState.SETTLED and not recorded["settled"]:
-                    code = self._retire_job(row, job, supervisor)
+                    code = self._retire_job(row, job, supervisor, observed_exit_code=code)
                 return {"state": state.value, "exit_code": code, "output": base64.b64encode(data).decode()}
             if op == "stop_job":
                 self._retire_job(row, job, supervisor)

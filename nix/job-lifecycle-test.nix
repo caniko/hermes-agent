@@ -44,6 +44,7 @@ in
           "tests/tools/test_supervision_control_stdin.py "
           "tests/tools/test_supervision_stop_fence.py "
           "tests/tools/test_supervised_process_completion.py "
+          "tests/tools/test_systemd_observation.py "
           "tests/tools/test_supervised_kernel_staging.py "
           "tests/tools/test_filesystem_claims.py "
           "tests/tools/test_filesystem_observation.py "

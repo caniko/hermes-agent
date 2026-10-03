@@ -178,14 +178,19 @@ class SystemdJobSupervisor:
         except (SupervisionError, ValueError):
             return JobState.UNKNOWN
 
-    def _all_settled(self, jobs: list[JobReceipt]) -> bool:
+    def _all_settled(self, jobs: list[JobReceipt], *, require_stop_fence: bool = False) -> bool:
         if not jobs:
             return True
         # Each receipt still needs its own target/cgroup proof, but SSH and the
         # controller's command guards need only one round trip for the set.
         for offset in range(0, len(jobs), 32):
             batch = jobs[offset:offset + 32]
-            script = "; ".join(f"( {self._inspect_script(job)} )" for job in batch)
+            checks = []
+            for job in batch:
+                fence = (f"test -f {shlex.quote(self.state_dir + '/fence/' + job.id + '.stopped')}; "
+                         if require_stop_fence else "")
+                checks.append(f"( {fence}{self._inspect_script(job)} )")
+            script = "; ".join(checks)
             if self._run(script).splitlines() != [JobState.SETTLED.value] * len(batch):
                 return False
         return True
@@ -201,6 +206,41 @@ class SystemdJobSupervisor:
         encoded = self._run(f"set -o pipefail; dd if={shlex.quote(folder + '/output')} "
                             f"iflag=skip_bytes,count_bytes skip={int(offset)} count=65536 status=none | base64")
         return base64.b64decode(encoded)
+
+    def observe(self, job: JobReceipt, offset: int = 0) -> tuple[JobState, int | None, bytes]:
+        if type(offset) is not int or not 0 <= offset <= 2**63 - 1:
+            raise ValueError("invalid output offset")
+        folder, unit = self._job(job)
+        # The authority needs all three observations together. Keep the target
+        # checks, but pay the SSH/guard/transport cost only once for the frame.
+        raw = self._run(
+            f"state=$( ( set -e; {self._inspect_script(job)} ) ); printf '%s\\n' \"$state\"; "
+            f"if test -f {shlex.quote(self.state_dir + '/fence/' + job.id + '.stopped')}; "
+            "then echo stopped; else echo unfenced; fi; "
+            f'if test "$state" != unknown; then fields=$(systemctl {self._manager} show {unit} '
+            "-p LoadState -p ExecMainCode -p ExecMainStatus) || "
+            '{ case "$fields" in *LoadState=not-found*) ;; *) exit 1;; esac; }; '
+            'printf "%s\\n" "$fields"; fi; '
+            "echo __HERMES_OUTPUT__; set -o pipefail; "
+            f"dd if={shlex.quote(folder + '/output')} iflag=skip_bytes,count_bytes "
+            f"skip={offset} count=65536 status=none | base64")
+        try:
+            header, output = raw.split("__HERMES_OUTPUT__\n", 1)
+            state_value, fence, *properties = header.splitlines()
+            state = JobState(state_value)
+            fields = dict(line.split("=", 1) for line in properties)
+            code = None
+            if state is not JobState.UNKNOWN:
+                if fields.get("LoadState") == "not-found":
+                    if fence != "stopped" or state is not JobState.SETTLED:
+                        raise SupervisionError("target job exit status is unavailable")
+                    code = -15
+                else:
+                    reason, status = int(fields["ExecMainCode"]), int(fields["ExecMainStatus"])
+                    code = None if reason == 0 else status if reason == 1 else -status
+            return state, code, base64.b64decode("".join(output.splitlines()), validate=True)
+        except (KeyError, ValueError) as exc:
+            raise SupervisionError("target job observation is unavailable") from exc
 
     def main_exit_code(self, job: JobReceipt) -> int | None:
         _, unit = self._job(job)
@@ -251,17 +291,19 @@ class SystemdJobSupervisor:
                                    f"mkdir -p -- {shlex.join(folders)}; touch -- {shlex.join(tombstones)}; "
                                    f"systemctl {self._manager} stop {shlex.join(units)}"))
         except SupervisionError:
-            if not self._all_settled(jobs):
+            if not self._all_settled(jobs, require_stop_fence=True):
                 raise
-        if not self._all_settled(jobs):
+        if not self._all_settled(jobs, require_stop_fence=True):
             raise SupervisionError("target job has not settled")
         # Failed transient units are retained by the manager. Retire only this
         # verified-empty set; collected units may already have disappeared.
         try:
             self._run(f"systemctl {self._manager} reset-failed {shlex.join(units)}")
         except SupervisionError:
-            if not self._all_settled(jobs):
-                raise
+            # Stop already fenced this set and verified every cgroup empty.
+            # Housekeeping cannot restart it; collected units commonly reject
+            # reset-failed. Losing that acknowledgement does not undo Stop proof.
+            pass
 
     def settled(self) -> bool:
         try:

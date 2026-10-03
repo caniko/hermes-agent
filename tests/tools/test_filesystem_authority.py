@@ -349,6 +349,55 @@ def test_restart_fences_delayed_submission_before_exposing_sealed_ledger(tmp_pat
 
 
 @pytest.mark.platforms("linux")
+@pytest.mark.parametrize("backend", ["local", "ssh"])
+def test_observation_reuses_exit_evidence_but_retains_ownership_until_stop(tmp_path, target, monkeypatch):
+    from tools.environments.job_supervision import JobReceipt, JobState
+
+    state, root = tmp_path / "authority", tmp_path / "data"
+    ClaimStore.initialize(state)
+    root.mkdir()
+    authority = FilesystemAuthority(state, {os.getuid(): {
+        "id": "controller", "execution_uid": os.getuid(), "roots": [str(root)],
+    }}, supervisor_factory=lambda row, uid: SystemdJobSupervisor(target, str(state / row["id"])))
+    message = {"version": 1, "authority": authority.store.authority_id, "principal": "controller",
+               "request": "attempt", "fingerprint": "fp"}
+
+    def call(op, **fields):
+        return authority.dispatch(os.getuid(), {**message, "op": op, **fields})
+
+    try:
+        call("reserve", roots=[str(root)])
+        provider = authority._supervisor(authority.store.get("controller", "attempt"))
+        job = uuid.uuid4().hex
+        call("start", job=job, cwd=str(root), environment={}, command="echo natural; exit 7")
+        wait_for(lambda: provider.inspect(JobReceipt(job)) is JobState.SETTLED)
+        with monkeypatch.context() as patch:
+            def duplicate_exit(*args):
+                raise AssertionError("the observation already carries the target exit evidence")
+            patch.setattr(provider, "main_exit_code", duplicate_exit)
+            with monkeypatch.context() as lost_stop:
+                def unavailable_stop(*args):
+                    raise SupervisionError("stop acknowledgement was lost")
+                lost_stop.setattr(provider, "stop_job", unavailable_stop)
+                with pytest.raises(SupervisionError, match="stop acknowledgement"):
+                    call("observe", job=job, offset=0)
+                recorded = authority.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=?", (job,)).fetchone()
+                assert tuple(recorded) == (7, 0)
+                assert call("reserve", request="waiter", roots=[str(root)])["state"] == "pending"
+            observation = call("observe", job=job, offset=0)
+        assert observation["state"] == "settled" and observation["exit_code"] == 7
+        assert call("reserve", request="waiter", roots=[str(root)])["state"] == "pending"
+        assert call("release")["state"] == "settled"
+        assert call("reserve", request="waiter", roots=[str(root)])["state"] == "active"
+    finally:
+        call("stop")
+        call("release")
+        call("stop", request="waiter")
+        call("release", request="waiter")
+        authority.close()
+
+
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("backend", ["local"])
 def test_failed_scope_preparation_fences_retries_until_explicit_release(tmp_path, monkeypatch, target):
     from pathlib import Path
