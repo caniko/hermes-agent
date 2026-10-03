@@ -34,9 +34,13 @@ async def test_two_gateways_park_before_tools_and_keep_key_rotation_identity(tmp
     state, root = tmp_path / "authority", tmp_path / "maintained"
     root.mkdir()
     ClaimStore.initialize(state)
+    # The hosted runner invokes Python by absolute store path. Its ambient PATH
+    # does not enroll an interpreter for jobs, which deliberately use the target
+    # policy instead of inheriting a controller or SSH login environment.
+    enrolled_path = os.path.dirname(sys.executable) + os.pathsep + os.environ["PATH"]
     authority = FilesystemAuthority(state, {os.getuid(): {
         "id": "controller", "execution_uid": os.getuid(), "roots": [str(root)],
-        "environment": {"PATH": os.environ["PATH"]},
+        "environment": {"PATH": enrolled_path},
     }}, supervisor_factory=lambda row, uid: SystemdJobSupervisor(target, str(state / row["id"])))
     called = []
     adapters = []
@@ -82,6 +86,9 @@ async def test_two_gateways_park_before_tools_and_keep_key_rotation_identity(tmp
                             result = json.loads(handle_function_call("terminal", {"command": "printf '%s' \"$HOME\""}, task_id=task_id))
                             assert result["exit_code"] == 0, result
                             assert "/jobs/" in result["output"], result
+                            interpreter = json.loads(handle_function_call("terminal", {"command": "command -v python3"}, task_id=task_id))
+                            assert interpreter["exit_code"] == 0, interpreter
+                            assert interpreter["output"].strip() == os.path.join(os.path.dirname(sys.executable), "python3"), interpreter
                             for code in ("owned_value = 40; print(owned_value)", "owned_value += 2; print(owned_value)"):
                                 cell = json.loads(handle_function_call("execute_code", {"code": code}, task_id=task_id))
                                 assert cell["status"] == "success", cell
