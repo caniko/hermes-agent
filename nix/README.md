@@ -34,3 +34,9 @@ The test-only diagnostics plugin also prints aggregated real control latency,
 authority-lock wait, and locked-dispatch duration. It keeps original calls and
 return values and prints no commands, payloads, paths, credentials, or claim IDs.
 These timings help explain deadline failures; they do not relax qualification.
+
+Supervised kernel setup stages its runner, tool stubs, and private environment
+in one admitted job, followed by the original fenced interpreter launch. File
+contents still travel only on stdin, with owner-only directories and files.
+This reduces serialized authority/control round trips within the existing
+ownership deadlines; it does not bypass job admission or settlement.
