@@ -57,13 +57,20 @@ in
           "tests/gateway/test_api_server_filesystem_ownership.py "
           "2>&1 | tee /var/lib/hermes-qualification/pytest.txt /dev/console", timeout=900)
       worker.copy_from_machine("/var/lib/hermes-qualification/pytest.txt")
+      # Emit pytest diagnostics first and the bounded report frames last. Nix
+      # may retain only a tail of the failed driver's log. Frame publication
+      # must finish synchronously on the driver, not race the VM console reader
+      # against QEMU cleanup after the assertion.
+      print(output, flush=True)
       if worker.execute("test -s /var/lib/hermes-qualification/lifecycle.xml")[0] == 0:
           worker.copy_from_machine("/var/lib/hermes-qualification/lifecycle.xml")
           # Failed derivations do not retain copy_from_machine's store output.
-          # Frame exact report/source bytes into the always-uploaded Nix log
-          # before the original assertion. Frames are diagnostics, not receipts.
-          worker.succeed("set -o pipefail && ${python} ${source}/scripts/qualify-job-lifecycle.py emit-diagnostics /var/lib/hermes-qualification/lifecycle.xml /etc/hermes-qualification-source.json | tee /dev/console")
-      assert status == 0, output
+          # Retrieve exact report/source bytes into the always-uploaded Nix log
+          # before the exit-status assertion. Frames are diagnostics, not receipts.
+          diagnostic_status, diagnostic_output = worker.execute("${python} ${source}/scripts/qualify-job-lifecycle.py emit-diagnostics /var/lib/hermes-qualification/lifecycle.xml /etc/hermes-qualification-source.json")
+          print(diagnostic_output, flush=True)
+          assert diagnostic_status == 0, "Lifecycle diagnostic emission failed"
+      assert status == 0, "Native lifecycle suite failed; see retained diagnostics above"
       worker.succeed("${python} ${source}/scripts/qualify-job-lifecycle.py /var/lib/hermes-qualification/lifecycle.xml /etc/hermes-qualification-source.json /var/lib/hermes-qualification/receipt.json")
       worker.copy_from_machine("/var/lib/hermes-qualification/receipt.json")
     '';

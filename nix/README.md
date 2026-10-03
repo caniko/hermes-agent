@@ -8,8 +8,10 @@ failures, errors, skips, duplicate cases, and JUnit retry/flaky markers.
 
 Successful builds retain `lifecycle.xml` and a SHA-256-bound `receipt.json`.
 Failed Nix derivations can discard copied driver outputs. After a completed
-suite, the driver therefore emits bounded, indexed report and source frames to
-the VM console before enforcing the original exit-status assertion. The
+suite, the driver therefore retrieves bounded, indexed report and source frames
+and prints them synchronously after pytest diagnostics, before enforcing the
+original exit-status assertion. This prevents VM console-reader cleanup races
+and places complete report frames at the tail of the failed driver log. The
 generated workflow retains those exact bytes in its `build.log`, including
 after failure, for 31 days.
 
