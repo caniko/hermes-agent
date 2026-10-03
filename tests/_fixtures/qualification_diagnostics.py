@@ -7,18 +7,22 @@ import time
 
 _lock = threading.Lock()
 _timings = {}
+_case_timings = {}
 _originals = []
+_OPERATIONS = frozenset({"capabilities", "reserve", "stop", "seal", "release", "drain",
+                         "status", "jobs", "start", "observe", "stop_job"})
 
 
 def _record(label, seconds):
     with _lock:
-        entry = _timings.setdefault(label, {"count": 0, "totalSeconds": 0.0, "maxSeconds": 0.0})
-        entry["count"] += 1
-        entry["totalSeconds"] += seconds
-        entry["maxSeconds"] = max(entry["maxSeconds"], seconds)
+        for timings in (_timings, _case_timings):
+            entry = timings.setdefault(label, {"count": 0, "totalSeconds": 0.0, "maxSeconds": 0.0})
+            entry["count"] += 1
+            entry["totalSeconds"] += seconds
+            entry["maxSeconds"] = max(entry["maxSeconds"], seconds)
 
 
-def _measure(cls, name, label):
+def _measure(cls, name, label, *, operations=False):
     original = getattr(cls, name)
 
     @wraps(original)
@@ -27,7 +31,13 @@ def _measure(cls, name, label):
         try:
             return original(self, *args, **kwargs)
         finally:
-            _record(label, time.monotonic() - started)
+            elapsed = time.monotonic() - started
+            _record(label, elapsed)
+            if operations:
+                op = args[0] if args else kwargs.get("op")
+                # Never render arbitrary request values into diagnostic labels.
+                op = op if isinstance(op, str) and op in _OPERATIONS else "other"
+                _record(f"{label}:{op}", elapsed)
 
     setattr(cls, name, measured)
     _originals.append((cls, name, original))
@@ -41,7 +51,7 @@ def pytest_sessionstart(session):
     # Every call still reaches the original control transport and authority.
     # Labels contain no commands, paths, payloads, credentials or claim IDs.
     _measure(SystemdJobSupervisor, "_run", "systemd-control")
-    _measure(FilesystemSupervisor, "_request", "authority-transport")
+    _measure(FilesystemSupervisor, "_request", "authority-transport", operations=True)
     original = FilesystemAuthority.dispatch
 
     @wraps(original)
@@ -68,5 +78,14 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 def pytest_runtest_logreport(report):
+    if report.when == "call" and report.nodeid.startswith("tests/gateway/test_api_server_filesystem_ownership.py::"):
+        with _lock:
+            snapshot = json.dumps(_case_timings, sort_keys=True)
+        print(f"\nQUALIFICATION_OWNERSHIP_TIMINGS {report.nodeid} {snapshot}", flush=True)
     if report.failed:
         print(f"\nQUALIFICATION_FAILURE {report.nodeid} ({report.when})\n{report.longrepr}", flush=True)
+
+
+def pytest_runtest_setup(item):
+    with _lock:
+        _case_timings.clear()

@@ -28,10 +28,14 @@ corrupt, incomplete, or mismatched evidence. An unstarted or interrupted suite
 does not become a completed report. `diagnostics.json` always has
 `qualified: false`; diagnostic recovery never creates a qualification receipt.
 Simit's optional `post_build_always` collector can automate recovery before
-artifact upload once its generator revision is qualified and pinned.
+artifact upload once its generator revision is qualified and pinned. The
+`Generate native diagnostic CI` PR workflow builds qualified immutable Simit
+`bbfef6f6674d9977d7504a0e9c66be39147d9400` on the hosted runner and retains
+generated config/workflow files with source and digest bindings for adoption.
 
 The test-only diagnostics plugin also prints aggregated real control latency,
-authority-lock wait, and locked-dispatch duration. It keeps original calls and
+authority-lock wait, and locked-dispatch duration, plus fixed operation labels
+and separate local/SSH ownership-case aggregates. It keeps original calls and
 return values and prints no commands, payloads, paths, credentials, or claim IDs.
 These timings help explain deadline failures; they do not relax qualification.
 
