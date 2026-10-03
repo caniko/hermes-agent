@@ -128,6 +128,7 @@ def test_stop_waits_for_slow_jobs_together_and_settles_every_cgroup(tmp_path, ta
             stopping = pool.submit(supervisor.stop)
             stopping.result(timeout=15)
         assert all(supervisor.inspect(job) is JobState.SETTLED for job in jobs)
+        assert all(supervisor.main_exit_code(job) is not None for job in jobs)
         assert supervisor.settled()
     finally:
         supervisor.stop()

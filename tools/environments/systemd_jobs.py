@@ -192,12 +192,17 @@ class SystemdJobSupervisor:
         _, unit = self._job(job)
         try:
             fields = dict(line.split("=", 1) for line in self._run(
-                f"systemctl {self._manager} show {unit} -p ExecMainCode -p ExecMainStatus").splitlines())
+                f"systemctl {self._manager} show {unit} -p LoadState -p ExecMainCode -p ExecMainStatus").splitlines())
         except SupervisionError:
+            fields = {}
+        # show can succeed after collection while exit properties have reverted
+        # to zero. Complete a retained handle only from the same durable Stop
+        # and empty-cgroup proof used when the manager rejects the lookup.
+        if not fields or fields.get("LoadState") == "not-found":
             self._run(f"test -f {shlex.quote(self.state_dir + '/fence/' + job.id + '.stopped')}")
             if self.inspect(job) is JobState.SETTLED:
                 return -15
-            raise
+            raise SupervisionError("target job exit status is unavailable")
         if not {"ExecMainCode", "ExecMainStatus"} <= fields.keys():
             raise SupervisionError("target job exit status is unavailable")
         code, status = int(fields["ExecMainCode"]), int(fields["ExecMainStatus"])

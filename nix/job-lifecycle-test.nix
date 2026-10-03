@@ -40,6 +40,7 @@ in
           "tests/tools/test_target_job_supervision.py "
           "tests/tools/test_supervision_control_stdin.py "
           "tests/tools/test_supervision_stop_fence.py "
+          "tests/tools/test_supervised_process_completion.py "
           "tests/tools/test_filesystem_claims.py "
           "tests/tools/test_filesystem_authority.py "
           "tests/tools/test_filesystem_authority_system.py "
