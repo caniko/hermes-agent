@@ -27,11 +27,15 @@ and source revision against the artifact's checkout revision. It rejects mixed,
 corrupt, incomplete, or mismatched evidence. An unstarted or interrupted suite
 does not become a completed report. `diagnostics.json` always has
 `qualified: false`; diagnostic recovery never creates a qualification receipt.
-Simit's optional `post_build_always` collector can automate recovery before
-artifact upload once its generator revision is qualified and pinned. The
-`Generate native diagnostic CI` PR workflow builds qualified immutable Simit
-`bbfef6f6674d9977d7504a0e9c66be39147d9400` on the hosted runner and retains
-generated config/workflow files with source and digest bindings for adoption.
+The generated workflow uses `post_build_always` to recover completed diagnostic
+frames before artifact upload, preserving a failed build's exit status. Its
+drift check pins qualified immutable Simit
+`bbfef6f6674d9977d7504a0e9c66be39147d9400`. The
+`Generate native diagnostic CI` PR workflow builds that generator on the hosted
+runner and retains config/workflow files with source and digest bindings. The
+adopted bytes match its independently verified run `37142435456` exactly.
+Hosted proof of automatic failed-build collection is still required; successful
+generation and manual recovery do not qualify the native lifecycle.
 
 The test-only diagnostics plugin also prints aggregated real control latency,
 authority-lock wait, and locked-dispatch duration, plus fixed operation labels

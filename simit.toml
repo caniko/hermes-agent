@@ -17,9 +17,10 @@ artifact_retention_days = 31
 extra_env = { NIX_CONFIG = "log-lines = 3000" }
 extra_setup = [
   "python3 scripts/test-qualify-job-lifecycle.py",
-  "nix run github:caniko/simit/362369c48b214d13340dffc2f858ab641adcd839 -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
+  "nix run github:caniko/simit/bbfef6f6674d9977d7504a0e9c66be39147d9400 -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
 ]
 post_build = ["python3 scripts/qualify-job-lifecycle.py retain"]
+post_build_always = ["python3 scripts/qualify-job-lifecycle.py retain-diagnostics"]
 
 [release.artifacts]
 substituters = ["https://cache.nixos.org"]
