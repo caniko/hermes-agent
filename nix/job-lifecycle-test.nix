@@ -59,6 +59,10 @@ in
       worker.copy_from_machine("/var/lib/hermes-qualification/pytest.txt")
       if worker.execute("test -s /var/lib/hermes-qualification/lifecycle.xml")[0] == 0:
           worker.copy_from_machine("/var/lib/hermes-qualification/lifecycle.xml")
+          # Failed derivations do not retain copy_from_machine's store output.
+          # Frame exact report/source bytes into the always-uploaded Nix log
+          # before the original assertion. Frames are diagnostics, not receipts.
+          worker.succeed("set -o pipefail && ${python} ${source}/scripts/qualify-job-lifecycle.py emit-diagnostics /var/lib/hermes-qualification/lifecycle.xml /etc/hermes-qualification-source.json | tee /dev/console")
       assert status == 0, output
       worker.succeed("${python} ${source}/scripts/qualify-job-lifecycle.py /var/lib/hermes-qualification/lifecycle.xml /etc/hermes-qualification-source.json /var/lib/hermes-qualification/receipt.json")
       worker.copy_from_machine("/var/lib/hermes-qualification/receipt.json")
