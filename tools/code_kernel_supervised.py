@@ -18,7 +18,10 @@ def spawn_supervised_kernel(binding, env, env_type, owner, task_env_id, sandbox_
     from tools.code_kernel_remote import REMOTE_KERNEL_RUNNER_SOURCE, RemoteKernel
     import secrets
 
-    directory = f"{binding.state_dir}/kernel-{uuid.uuid4().hex}"
+    # Authority control state is not exposed to workloads. An owned binding
+    # stages files in the separately granted execution-host runtime instead.
+    staging = getattr(binding.supervisor, "runtime_dir", None) or binding.state_dir
+    directory = f"{staging}/kernel-{uuid.uuid4().hex}"
     _execute_checked(env, _private_dirs_cmd(directory, f"{directory}/cells", f"{directory}/rpc"),
                      "supervised kernel staging", timeout=15)
     token = secrets.token_urlsafe(32)

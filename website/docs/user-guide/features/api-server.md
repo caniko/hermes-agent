@@ -530,6 +530,10 @@ between cells within a run; its interpreter exits at run completion, and any
 remaining child processes still hold the run open. Kernels are not resumed by a
 later run.
 
+With filesystem ownership enabled, kernel code and RPC files use the claim's
+private execution-host runtime directory. Authority control state stays outside
+the workload's filesystem namespace.
+
 Stop, cancellation, and failed turns fence new launches and terminate admitted
 jobs before publishing a terminal state. A `stopping` acknowledgement only
 confirms that stopping was requested. Loss of the SSH/control channel leaves the

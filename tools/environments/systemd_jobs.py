@@ -152,12 +152,12 @@ class SystemdJobSupervisor:
             self._job(job)
         return sorted(jobs, key=lambda job: job.id)
 
-    def inspect(self, job: JobReceipt) -> JobState:
+    def _inspect_script(self, job: JobReceipt) -> str:
         folder, unit = self._job(job)
         root, dest = shlex.quote(self.state_dir), shlex.quote(folder)
         # A failed control channel is not an empty cgroup. A missing unit is only
         # conclusive AFTER the launch fence, or after an execution-host reboot.
-        script = (
+        return (
             f"test -f {root}/fence/boot; test -d {dest} || test -f {root}/fence/sealed; "
             f"if ! cmp -s {root}/fence/boot /proc/sys/kernel/random/boot_id; then echo settled; exit; fi; "
             f"state=$(systemctl {self._manager} show {unit} -p LoadState -p ActiveState -p SubState -p ControlGroup) || "
@@ -171,10 +171,24 @@ class SystemdJobSupervisor:
             'if grep -qx "populated 0" "/sys/fs/cgroup$group/cgroup.events"; then echo settled; else echo running; fi; '
             'elif test "$active" = inactive || test "$active" = failed || test "$sub" = exited; then echo settled; '
             'else echo unknown; fi')
+
+    def inspect(self, job: JobReceipt) -> JobState:
         try:
-            return JobState(self._run(script).strip())
+            return JobState(self._run(self._inspect_script(job)).strip())
         except (SupervisionError, ValueError):
             return JobState.UNKNOWN
+
+    def _all_settled(self, jobs: list[JobReceipt]) -> bool:
+        if not jobs:
+            return True
+        # Each receipt still needs its own target/cgroup proof, but SSH and the
+        # controller's command guards need only one round trip for the set.
+        for offset in range(0, len(jobs), 32):
+            batch = jobs[offset:offset + 32]
+            script = "; ".join(f"( {self._inspect_script(job)} )" for job in batch)
+            if self._run(script).splitlines() != [JobState.SETTLED.value] * len(batch):
+                return False
+        return True
 
     def output(self, job: JobReceipt) -> str:
         folder, _ = self._job(job)
@@ -237,21 +251,21 @@ class SystemdJobSupervisor:
                                    f"mkdir -p -- {shlex.join(folders)}; touch -- {shlex.join(tombstones)}; "
                                    f"systemctl {self._manager} stop {shlex.join(units)}"))
         except SupervisionError:
-            if not all(self.inspect(job) is JobState.SETTLED for job in jobs):
+            if not self._all_settled(jobs):
                 raise
-        if not all(self.inspect(job) is JobState.SETTLED for job in jobs):
+        if not self._all_settled(jobs):
             raise SupervisionError("target job has not settled")
         # Failed transient units are retained by the manager. Retire only this
         # verified-empty set; collected units may already have disappeared.
         try:
             self._run(f"systemctl {self._manager} reset-failed {shlex.join(units)}")
         except SupervisionError:
-            if not all(self.inspect(job) is JobState.SETTLED for job in jobs):
+            if not self._all_settled(jobs):
                 raise
 
     def settled(self) -> bool:
         try:
             self._run(f"test -f {shlex.quote(self.state_dir + '/fence/sealed')}")
-            return all(self.inspect(job) is JobState.SETTLED for job in self.jobs())
+            return self._all_settled(self.jobs())
         except SupervisionError:
             return False

@@ -17,7 +17,7 @@ def test_stop_fences_all_jobs_and_requires_each_settlement(tmp_path, uncertain):
     fence = root / "fence"
     fence.mkdir(parents=True)
     (fence / "boot").write_bytes(Path("/proc/sys/kernel/random/boot_id").read_bytes())
-    ids = [f"{value:032x}" for value in range(1, 4)]
+    ids = [f"{value:032x}" for value in range(1, 36)]
     for job in ids:
         (root / f"job-{job}").mkdir()
     if uncertain:
@@ -58,7 +58,9 @@ esac
     systemctl.chmod(0o700)
     environment = {**os.environ, "FIXTURE_ROOT": str(root), "PATH": str(manager) + os.pathsep + os.environ["PATH"]}
 
+    control_calls = []
     def execute(script, stdin=None):
+        control_calls.append(script)
         return subprocess.run(["bash", "--noprofile", "--norc", "-c", script],
                               input=stdin, env=environment, capture_output=True, text=True, timeout=10)
 
@@ -70,6 +72,9 @@ esac
         assert supervisor.inspect(supervisor.jobs()[-1]) is JobState.UNKNOWN
     else:
         supervisor.stop()
+        # A run may have many short staging jobs. Its Stop proof must not pay
+        # a new SSH/control-channel round trip for every retained receipt.
+        assert len(control_calls) <= 6
         assert supervisor.settled()
     assert (fence / "sealed").exists()
     assert all((fence / f"{job}.stopped").exists() for job in ids)

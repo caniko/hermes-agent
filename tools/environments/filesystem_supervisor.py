@@ -93,7 +93,11 @@ class FilesystemSupervisor:
             cached = self._observations.get(key)
             now = time.monotonic()
             if cached is None or now - cached[0] >= .5:
-                cached = now, self._request("observe", job=job.id, offset=offset)
+                observation = self._request("observe", job=job.id, offset=offset)
+                # Slow target control can exceed the reuse window itself. Date
+                # the coherent exit/state/output snapshot on receipt, so the
+                # handle does not immediately repeat the same expensive query.
+                cached = time.monotonic(), observation
                 # Retain one observation per job, never a second log buffer.
                 self._observations = {k: v for k, v in self._observations.items() if k[0] != job.id}
                 self._observations[key] = cached
