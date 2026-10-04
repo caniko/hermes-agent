@@ -268,7 +268,9 @@ async def test_run_remains_owned_until_jobs_settle_and_stop_fences_them(tmp_path
                     else:
                         (data / ("release-" + run_id)).touch()
                     await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 20)
-                    assert adapter._run_statuses[run_id]["status"] == ("cancelled" if cancel else "completed")
+                    assert adapter._run_statuses[run_id]["status"] == (
+                        "cancelled" if cancel else "completed"
+                    ), adapter._run_statuses[run_id]
                     assert run_id not in adapter._active_run_agents
                     if tool != "terminal":
                         from tools.code_kernel_remote import _REMOTE_KERNELS
