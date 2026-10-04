@@ -197,14 +197,18 @@ class SSHEnvironment(BaseEnvironment):
         # Symlink staging avoids fragile GNU tar --transform rules. On Windows
         # without Developer Mode symlink creation raises OSError winerror 1314;
         # only that case falls back to a plain copy, other OSErrors re-raise.
-        with tempfile.TemporaryDirectory(prefix="hermes-ssh-bulk-") as staging:
+        with tempfile.TemporaryDirectory(prefix="hermes-ssh-bulk-") as scratch:
+            staging = os.path.join(scratch, "files")
+            os.mkdir(staging)
+            relative_paths = []
             for host_path, remote_path in files:
                 try:
                     rel_remote = os.path.relpath(remote_path, base)
                 except ValueError as exc:
                     raise RuntimeError(f"remote path {remote_path!r} is not under sync base {base!r}") from exc
-                if rel_remote == "." or rel_remote.startswith("../"):
+                if rel_remote in (".", os.pardir) or rel_remote.startswith(os.pardir + os.sep):
                     raise RuntimeError(f"remote path {remote_path!r} escapes sync base {base!r}")
+                relative_paths.append("./" + rel_remote.replace(os.sep, "/"))
                 staged = os.path.join(staging, rel_remote)
                 os.makedirs(os.path.dirname(staged), exist_ok=True)
                 try:
@@ -214,10 +218,15 @@ class SSHEnvironment(BaseEnvironment):
                         raise
                     shutil.copy2(host_path, staged)
 
-            # --no-overwrite-dir keeps tar from stamping the staging dir's mode onto
-            # existing dirs (e.g. /home/<user>); a umask-002 0775 home breaks sshd StrictModes.
-            ssh_cmd = self._build_ssh_command() + [f"tar xf - --no-overwrite-dir -C {shlex.quote(base)}"]
-            tar_proc = subprocess.Popen(["tar", "-chf", "-", "-C", staging, "."], stdin=subprocess.DEVNULL,
+            # Archive only files: GNU and BSD tar then leave existing directory
+            # modes intact without GNU-only --no-overwrite-dir. NUL-delimited
+            # names handle newlines and keep large skill sets out of argv.
+            file_list = os.path.join(scratch, "files.list")
+            with open(file_list, "wb") as stream:
+                for path in relative_paths:
+                    stream.write(os.fsencode(path) + b"\0")
+            ssh_cmd = self._build_ssh_command() + [f"tar xf - -C {shlex.quote(base)}"]
+            tar_proc = subprocess.Popen(["tar", "-chf", "-", "-C", staging, "--null", "-T", file_list], stdin=subprocess.DEVNULL,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 ssh_proc = subprocess.Popen(ssh_cmd, stdin=tar_proc.stdout,
