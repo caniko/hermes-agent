@@ -463,6 +463,16 @@ def _ship_file_to_remote(env, remote_path: str, content: str, *, atomic: bool = 
     _remote_write(env, remote_path, content, atomic=atomic, check=True)
 
 
+def _remote_env_content(rpc_dir: str, rpc_token: str, **extra_env: str) -> str:
+    """Serialize the private remote environment for stdin-only staging."""
+    env_map = {"HERMES_RPC_DIR": rpc_dir, "HERMES_RPC_TOKEN": rpc_token,
+               "PYTHONDONTWRITEBYTECODE": "1", **extra_env}
+    tz = get_timezone_name()
+    if tz:
+        env_map["TZ"] = tz
+    return "".join(f"{k}={shlex.quote(v)}\n" for k, v in env_map.items())
+
+
 def _ship_env_file_and_launch(env, remote_dir: str, env_name: str, launch: str, *,
                               rpc_dir: str, rpc_token: str, **extra_env: str) -> str:
     """Ship the sandbox env (RPC dir + token, PYTHONDONTWRITEBYTECODE, the routed
@@ -477,12 +487,7 @@ def _ship_env_file_and_launch(env, remote_dir: str, env_name: str, launch: str, 
     them into every later command on the backend (the #71296 snapshot-leak
     class). The token also stays off the remote shell's argv, which co-tenant
     users can read via ps for the command's lifetime."""
-    env_map = {"HERMES_RPC_DIR": rpc_dir, "HERMES_RPC_TOKEN": rpc_token,
-               "PYTHONDONTWRITEBYTECODE": "1", **extra_env}
-    tz = get_timezone_name()  # routed profile's timezone, not the bridged default's
-    if tz:
-        env_map["TZ"] = tz
-    lines = "".join(f"{k}={shlex.quote(v)}\n" for k, v in env_map.items())
+    lines = _remote_env_content(rpc_dir, rpc_token, **extra_env)
     _ship_file_to_remote(env, f"{remote_dir}/{env_name}", lines)
     return (f"cd {shlex.quote(remote_dir)} && "
             f"( set -a && . ./{env_name} && set +a && {launch} )")

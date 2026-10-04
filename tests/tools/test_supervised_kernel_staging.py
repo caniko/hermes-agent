@@ -1,4 +1,4 @@
-"""An owned kernel stages private files inside its execution-host grant."""
+"""Kernel setup keeps payloads private while paying one target admission."""
 
 import io
 from pathlib import Path
@@ -20,11 +20,13 @@ def test_owned_kernel_stays_in_the_granted_runtime(tmp_path, monkeypatch, backen
     runtime = tmp_path / "granted runtime"
     runtime.mkdir()
     launches = []
+    staging_commands = []
 
     class TargetEnvironment:
         def execute(self, command, *, cwd, timeout, stdin_data=None):
             # Refuse the former root-level staging before it can touch the host.
             assert str(runtime) in command, "kernel files escaped the granted runtime"
+            staging_commands.append(command)
             result = subprocess.run(["bash", "--noprofile", "--norc", "-c", command],
                                     input=stdin_data, cwd=cwd, timeout=timeout,
                                     capture_output=True, text=True)
@@ -43,5 +45,58 @@ def test_owned_kernel_stays_in_the_granted_runtime(tmp_path, monkeypatch, backen
     for name in ("kernel_runner.py", "hermes_tools.py", "kernel.env"):
         assert stat.S_IMODE((directory / name).stat().st_mode) == 0o600
     assert len(launches) == 1
+    assert len(staging_commands) == 1
+    assert kernel.rpc_token not in staging_commands[0]
     assert kernel.rpc_token not in launches[0]
     assert binding.kernels == [kernel]
+
+
+class Shell:
+    def __init__(self):
+        self.commands = []
+
+    def execute(self, command, *, cwd, timeout, stdin_data):
+        self.commands.append(command)
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-c", command],
+                                cwd=cwd, timeout=timeout, input=stdin_data,
+                                capture_output=True, text=True)
+        return {"returncode": result.returncode, "output": result.stdout + result.stderr}
+
+
+def test_stage_kernel_in_one_admission_with_private_exact_payloads(tmp_path):
+    from tools.code_kernel_supervised import _stage_kernel_files
+
+    env = Shell()
+    directory = tmp_path / "kernel with 'quotes' ; spaces"
+    contents = ("print('café')\n", "# tool stubs\n", "export TOKEN='secret-not-in-argv'\n")
+    _stage_kernel_files(env, str(directory), *contents)
+    assert len(env.commands) == 1
+    assert all(content.strip() not in env.commands[0] for content in contents)
+    for name, content in zip(("kernel_runner.py", "hermes_tools.py", "kernel.env"), contents):
+        path = directory / name
+        assert path.read_text() == content
+        assert path.stat().st_mode & 0o777 == 0o600
+    for path in (directory, directory / "cells", directory / "rpc"):
+        assert path.stat().st_mode & 0o777 == 0o700
+    assert not (tmp_path / "spaces").exists()
+
+
+@pytest.mark.parametrize("failure", ["incomplete_stdin", "directory_setup"])
+def test_stage_kernel_refuses_incomplete_setup(tmp_path, failure):
+    from tools.code_kernel_supervised import _stage_kernel_files
+
+    class TruncatedShell(Shell):
+        def execute(self, command, **kwargs):
+            kwargs["stdin_data"] = kwargs["stdin_data"].splitlines()[0] + "\n"
+            return super().execute(command, **kwargs)
+
+    directory = tmp_path / "kernel"
+    env = TruncatedShell() if failure == "incomplete_stdin" else Shell()
+    if failure == "directory_setup":
+        directory.write_text("existing file")
+    with pytest.raises(RuntimeError, match="supervised kernel staging failed"):
+        _stage_kernel_files(env, str(directory), "runner", "tools", "secret")
+    if failure == "directory_setup":
+        assert directory.read_text() == "existing file"
+    else:
+        assert not (directory / "kernel.env").exists()
