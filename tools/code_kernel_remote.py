@@ -323,8 +323,16 @@ def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int) -> Tuple[str
     seq = f"{kernel.cell_seq:06d}"
     q_cells, q_res = shlex.quote(f"{kernel.kernel_dir}/cells"), shlex.quote(f"cell_res_{seq}.json")
     # One round-trip: tmp write + rename publishes the request atomically.
-    _ship_file_to_remote(kernel.env, f"{kernel.kernel_dir}/cells/cell_req_{seq}.json",
-                         json.dumps({"id": seq, "code": code}, ensure_ascii=False), atomic=True)
+    try:
+        _ship_file_to_remote(kernel.env, f"{kernel.kernel_dir}/cells/cell_req_{seq}.json",
+                             json.dumps({"id": seq, "code": code}, ensure_ascii=False), atomic=True)
+    except (RuntimeError, OSError):
+        # Stop can fence the shipping job after its atomic rename already let
+        # the runner start this cell. Only a confirmed runner exit permits an
+        # interruption result; lost control evidence must still propagate.
+        if kernel.supervised_process is not None and not kernel.is_alive():
+            return "interrupted", {}
+        raise
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:

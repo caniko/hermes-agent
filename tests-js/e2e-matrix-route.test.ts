@@ -53,3 +53,20 @@ test('the pr route runs one script install updated by hermes update per OS start
     'windows: installer-script -> hermes-update (HEAD -> NEXT)',
   ])
 })
+
+test('results remain reportable when the release picker produced no metadata', () => {
+  const jobs: string = JSON.stringify({
+    name: 'linux: installer-script -> hermes-update (HEAD -> NEXT) / e2e',
+    conclusion: 'failure',
+  })
+  const report = (tags: string): string => execFileSync(process.execPath,
+    [script, '--format', 'results', '--tags', tags], { input: jobs, encoding: 'utf8' })
+
+  expect(report('')).toEqual(report('[]'))
+  expect(report('')).toContain('0 passed, 1 failed')
+})
+
+test('results still reject malformed nonempty release metadata', () => {
+  expect(() => execFileSync(process.execPath,
+    [script, '--format', 'results', '--tags', '['], { input: '', encoding: 'utf8' })).toThrow()
+})

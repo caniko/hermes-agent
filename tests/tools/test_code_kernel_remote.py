@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tools.code_kernel_remote import (
     _REMOTE_KERNELS,
+    _run_remote_cell,
     RemoteKernel,
     execute_in_remote_kernel,
     shutdown_all_remote_kernels,
@@ -227,6 +228,46 @@ class TestOwnershipIsolation(RemoteKernelBase):
         self.assertEqual(len(_REMOTE_KERNELS), 1)
         remaining_owner = next(iter(_REMOTE_KERNELS))[0]
         self.assertEqual(remaining_owner, "owner-b")
+
+
+class TestSupervisedCellAdmission(unittest.TestCase):
+    def test_stop_after_cell_ship_returns_interrupted_without_replay(self):
+        from types import SimpleNamespace
+        from tools.environments.job_supervision import JobReceipt
+
+        env = ScriptedEnv([("cell_req_", lambda c: {"output": "", "returncode": -15})])
+        supervisor = SimpleNamespace(main_exit_code=lambda job: -15)
+        process = SimpleNamespace(supervisor=supervisor, job=JobReceipt("a" * 32))
+        kernel = RemoteKernel(env, "ssh", "/owned/kernel", "", "token", "owner",
+                              supervised_process=process)
+
+        self.assertEqual(_run_remote_cell(kernel, "print(1)", 10), ("interrupted", {}))
+        self.assertEqual(len(env.commands), 1)
+        self.assertEqual(len(env.stdin_payloads), 1)
+        self.assertEqual(kernel.cell_seq, 1)
+
+    def test_ship_failure_with_live_or_unknown_runner_keeps_error(self):
+        from types import SimpleNamespace
+        from tools.environments.job_supervision import JobReceipt, SupervisionError
+
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                env = ScriptedEnv([("cell_req_", lambda c: {"output": "", "returncode": -15})])
+
+                def observe(job):
+                    if unknown:
+                        raise SupervisionError("control acknowledgement lost")
+                    return None
+
+                process = SimpleNamespace(supervisor=SimpleNamespace(main_exit_code=observe),
+                                          job=JobReceipt("a" * 32))
+                kernel = RemoteKernel(env, "ssh", "/owned/kernel", "", "token", "owner",
+                                      supervised_process=process)
+                expected = SupervisionError if unknown else RuntimeError
+                with self.assertRaises(expected):
+                    _run_remote_cell(kernel, "print(1)", 10)
+                self.assertEqual(len(env.commands), 1)
+                self.assertEqual(kernel.cell_seq, 1)
 
 
 class TestIdleReapAndCapEviction(RemoteKernelBase):
