@@ -531,7 +531,8 @@ async function main() {
   });
   if (values.format === 'results') {
     const jobs = (await readStdin()).split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
-    const annotations = /** @type {TagAnnotation[]} */ (JSON.parse(values.tags));
+    // A failed pick-releases job leaves its optional report metadata empty.
+    const annotations = /** @type {TagAnnotation[]} */ (JSON.parse(values.tags || '[]'));
     /** @type {Map<string, number>} */
     const artifactById = new Map();
     if (values.artifacts) {
