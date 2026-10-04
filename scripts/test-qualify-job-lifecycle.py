@@ -63,7 +63,7 @@ class QualificationTests(unittest.TestCase):
         ET.SubElement(suite[0], "failure").text = "failed assertion " * 500
         ET.ElementTree(root).write(report)
         source = Path(directory) / "source.json"
-        source.write_text(json.dumps({"revision": "a" * 40}))
+            source.write_text(json.dumps({"revision": "a" * 40}), encoding="utf-8")
         output = io.StringIO()
         with redirect_stdout(output):
             qualification.emit_diagnostics(report, source)
@@ -79,11 +79,11 @@ class QualificationTests(unittest.TestCase):
             recovered = qualification.recover_diagnostics(transported, "a" * 40)
             self.assertEqual(recovered["lifecycle.xml"], report.read_bytes())
             self.assertEqual(recovered["source.json"], source.read_bytes())
-            (Path(directory) / "revision").write_text("a" * 40)
-            (Path(directory) / "build.log").write_text(transported)
+            (Path(directory) / "revision").write_text("a" * 40, encoding="utf-8")
+            (Path(directory) / "build.log").write_text(transported, encoding="utf-8")
             with patch.dict(os.environ, SIMIT_NIX_BUILD_RESULTS=directory):
                 qualification.retain_diagnostics()
-            diagnostics = json.loads((Path(directory) / "diagnostics.json").read_text())
+            diagnostics = json.loads((Path(directory) / "diagnostics.json").read_text(encoding="utf-8-sig"))
             self.assertFalse(diagnostics["qualified"])
             self.assertFalse((Path(directory) / "receipt.json").exists())
             with self.assertRaisesRegex(ValueError, "Incomplete lifecycle proof"):
@@ -107,7 +107,7 @@ class QualificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch.dict(os.environ, SIMIT_NIX_BUILD_RESULTS=directory):
                 qualification.retain_diagnostics()
-                (Path(directory) / "build.log").write_text("VM never completed\n")
+            (Path(directory) / "build.log").write_text("VM never completed\n", encoding="utf-8")
                 qualification.retain_diagnostics()
             self.assertFalse((Path(directory) / "diagnostics.json").exists())
 
