@@ -127,7 +127,7 @@ class QualificationTests(unittest.TestCase):
             with patch.object(sys, "argv", [str(script), "retain-diagnostics"]):
                 with patch.dict(os.environ, SIMIT_NIX_BUILD_RESULTS=directory):
                     runpy.run_path(str(script), run_name="__main__")
-            diagnostics = json.loads((Path(directory) / "diagnostics.json").read_text(encoding="utf-8"))
+            diagnostics = json.loads((Path(directory) / "diagnostics.json").read_text(encoding="utf-8-sig"))
             self.assertFalse(diagnostics["qualified"])
             self.assertFalse((Path(directory) / "receipt.json").exists())
 
