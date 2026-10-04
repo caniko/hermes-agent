@@ -173,5 +173,5 @@ if __name__ == "__main__":
         emit_diagnostics(report, source)
     else:
         report, source, destination = map(Path, sys.argv[1:])
-    receipt = qualify(report, json.loads(source.read_text(encoding="utf-8-sig")))
-    destination.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        receipt = qualify(report, json.loads(source.read_text(encoding="utf-8-sig")))
+        destination.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")

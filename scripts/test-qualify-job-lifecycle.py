@@ -6,6 +6,8 @@ import importlib.util
 import io
 import json
 import os
+import runpy
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -63,7 +65,7 @@ class QualificationTests(unittest.TestCase):
         ET.SubElement(suite[0], "failure").text = "failed assertion " * 500
         ET.ElementTree(root).write(report)
         source = Path(directory) / "source.json"
-            source.write_text(json.dumps({"revision": "a" * 40}), encoding="utf-8")
+        source.write_text(json.dumps({"revision": "a" * 40}), encoding="utf-8")
         output = io.StringIO()
         with redirect_stdout(output):
             qualification.emit_diagnostics(report, source)
@@ -107,9 +109,27 @@ class QualificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch.dict(os.environ, SIMIT_NIX_BUILD_RESULTS=directory):
                 qualification.retain_diagnostics()
-            (Path(directory) / "build.log").write_text("VM never completed\n", encoding="utf-8")
+                (Path(directory) / "build.log").write_text("VM never completed\n", encoding="utf-8")
                 qualification.retain_diagnostics()
             self.assertFalse((Path(directory) / "diagnostics.json").exists())
+
+    def test_diagnostic_subcommands_do_not_fall_through_to_qualification(self):
+        script = Path(__file__).with_name("qualify-job-lifecycle.py")
+        with tempfile.TemporaryDirectory() as directory:
+            report, source, expected_log = self.diagnostic_fixture(directory)
+            output = io.StringIO()
+            with patch.object(sys, "argv", [str(script), "emit-diagnostics", str(report), str(source)]):
+                with redirect_stdout(output):
+                    runpy.run_path(str(script), run_name="__main__")
+            self.assertEqual(output.getvalue(), expected_log)
+            (Path(directory) / "revision").write_text("a" * 40, encoding="utf-8")
+            (Path(directory) / "build.log").write_text(output.getvalue(), encoding="utf-8")
+            with patch.object(sys, "argv", [str(script), "retain-diagnostics"]):
+                with patch.dict(os.environ, SIMIT_NIX_BUILD_RESULTS=directory):
+                    runpy.run_path(str(script), run_name="__main__")
+            diagnostics = json.loads((Path(directory) / "diagnostics.json").read_text(encoding="utf-8"))
+            self.assertFalse(diagnostics["qualified"])
+            self.assertFalse((Path(directory) / "receipt.json").exists())
 
     def test_mutable_revision_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
