@@ -107,3 +107,14 @@ xinbenlv <zzn+pa@zzn.im> <zzn+pa@zzn.im>
 SaulJWu <saul.jj.wu@gmail.com> <saul.jj.wu@gmail.com>
 angelos <angelos@oikos.lan.home.malaiwah.com> <angelos@oikos.lan.home.malaiwah.com>
 MestreY0d4-Uninter <241404605+MestreY0d4-Uninter@users.noreply.github.com> <MestreY0d4-Uninter@users.noreply.github.com>
+
+# Case aliases share verified identities without case-colliding mapping files.
+# Upstream contributor mappings at 1fd75357; account IDs verified through GitHub.
+momomojo <35302851+momomojo@users.noreply.github.com> <agent@Agents-Mac-mini.local>
+Halldrix <12357213+Halldrix@users.noreply.github.com> <Halldrix@users.noreply.github.com>
+
+# Placeholder addresses are scoped to the original contributor's name.
+# https://github.com/NousResearch/hermes-agent/pull/125856 (lekt9)
+lekt9 <3887946+lekt9@users.noreply.github.com> lekt9 <you@example.com>
+# https://github.com/NousResearch/hermes-agent/pull/82817 (ydem), salvaged in #108194
+Youssef <29560442+ydem@users.noreply.github.com> Youssef <youssef@example.com>
