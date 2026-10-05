@@ -185,15 +185,18 @@ class SystemdJobSupervisor:
         # controller's command guards need only one round trip for the set.
         for offset in range(0, len(jobs), 32):
             batch = jobs[offset:offset + 32]
-            checks = []
-            for job in batch:
-                fence = (f"test -f {shlex.quote(self.state_dir + '/fence/' + job.id + '.stopped')}; "
-                         if require_stop_fence else "")
-                checks.append(f"( {fence}{self._inspect_script(job)} )")
-            script = "; ".join(checks)
+            script = self._settlement_script(batch, require_stop_fence=require_stop_fence)
             if self._run(script).splitlines() != [JobState.SETTLED.value] * len(batch):
                 return False
         return True
+
+    def _settlement_script(self, jobs: list[JobReceipt], *, require_stop_fence: bool) -> str:
+        checks = []
+        for job in jobs:
+            fence = (f"test -f {shlex.quote(self.state_dir + '/fence/' + job.id + '.stopped')}; "
+                     if require_stop_fence else "")
+            checks.append(f"( set -e; {fence}{self._inspect_script(job)} )")
+        return "; ".join(checks)
 
     def output(self, job: JobReceipt) -> str:
         folder, _ = self._job(job)
@@ -286,10 +289,31 @@ class SystemdJobSupervisor:
         # before waiting on the manager, which stops the units together instead
         # of paying each job's grace and control round trips serially.
         tombstones = [self.state_dir + '/fence/' + job.id + '.stopped' for job in jobs]
+        stop = self._gate(f"test -f {shlex.quote(self.state_dir + '/fence/boot')}; "
+                          f"mkdir -p -- {shlex.join(folders)}; touch -- {shlex.join(tombstones)}; "
+                          f"systemctl {self._manager} stop {shlex.join(units)}")
+        if len(jobs) <= 32:
+            # Short admitted staging/RPC jobs retire under the authority lock.
+            # Keep their stop, per-job proof and housekeeping in one target call,
+            # rather than blocking unrelated starts for three transport/guard trips.
+            proof = self._settlement_script(jobs, require_stop_fence=True)
+            expected = shlex.quote("\n".join([JobState.SETTLED.value] * len(jobs)))
+            try:
+                observed = self._run(
+                    stop + f"; settled=$( {proof} ); printf '%s\\n' \"$settled\"; "
+                    f'if test "$settled" = {expected}; then '
+                    f"systemctl {self._manager} reset-failed {shlex.join(units)} || true; fi")
+            except SupervisionError:
+                # A lost stop/proof acknowledgement still needs a fresh fence
+                # and empty-cgroup observation before ownership can retire.
+                if not self._all_settled(jobs, require_stop_fence=True):
+                    raise
+            else:
+                if observed.splitlines() != [JobState.SETTLED.value] * len(jobs):
+                    raise SupervisionError("target job has not settled")
+            return
         try:
-            self._run(self._gate(f"test -f {shlex.quote(self.state_dir + '/fence/boot')}; "
-                                   f"mkdir -p -- {shlex.join(folders)}; touch -- {shlex.join(tombstones)}; "
-                                   f"systemctl {self._manager} stop {shlex.join(units)}"))
+            self._run(stop)
         except SupervisionError:
             if not self._all_settled(jobs, require_stop_fence=True):
                 raise
