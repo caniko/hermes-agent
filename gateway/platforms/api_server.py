@@ -2537,6 +2537,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "chat_completions": True, "chat_completions_streaming": True,
                 "responses_api": True, "responses_streaming": True, "run_submission": True,
                 "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
+                "runs_execution_context": {
+                    "version": 1, "backends": ["local", "ssh"], "mode": "precondition",
+                    "lifetimes": ["wait_for_jobs"],
+                    "stop_admission": True,
+                    "filesystem_ownership": {"version": 1, "early_intent": True, "target_authority": True,
+                                             "controller_release": True},
+                },
                 **_STATIC_FEATURE_FLAGS,
                 "cors": bool(self._cors_origins),
                 # Always advertised for feature-detection; enabled follows config.
@@ -3447,6 +3454,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     async def _admit_to_live_bot_chat(
         self, session_id: str, message: Any, author: Optional[Dict[str, Any]],
+        *, allow_handoff: bool = True,
     ) -> Optional[Tuple[Path, Dict[str, Any]]]:
         """Admit a turn aimed at the canonical Bot Chat to the Desktop session that holds it live.
 
@@ -3468,6 +3476,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # Only the canonical Bot Chat's own lineage: a peer turn into any other session runs here.
             if owner is None or db.get_compression_tip(session_id) != owner["session_id"]:
                 return None
+            if not allow_handoff:
+                from gateway.platforms.api_server_execution_context import ExecutionContextError
+                raise ExecutionContextError("A live conversation owner cannot accept an execution_context-bound run")
             return deliver_to_live_owner(home, owner, message, author=author)
 
         record = await asyncio.to_thread(_admit)
@@ -4403,6 +4414,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _handle_run_approval = _run_route_delegate("_handle_run_approval")
     _handle_steer_run = _run_route_delegate("_handle_steer_run")
     _handle_stop_run = _run_route_delegate("_handle_stop_run")
+
+    async def _handle_stop_admission(self, request: "web.Request") -> "web.Response":
+        from gateway.platforms.api_server_run_admission import stop_admission
+        return await stop_admission(self, request, api=sys.modules[__name__])
+
+    async def _handle_filesystem_ownership(self, request: "web.Request") -> "web.Response":
+        from gateway.platforms.api_server_filesystem_ownership import handle_ownership
+
+        return await handle_ownership(self, request, api=sys.modules[__name__])
 
     async def _sweep_orphaned_runs(self) -> None:
         return await _api_runs._sweep_orphaned_runs(self)

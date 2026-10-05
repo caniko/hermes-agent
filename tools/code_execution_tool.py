@@ -463,6 +463,16 @@ def _ship_file_to_remote(env, remote_path: str, content: str, *, atomic: bool = 
     _remote_write(env, remote_path, content, atomic=atomic, check=True)
 
 
+def _remote_env_content(rpc_dir: str, rpc_token: str, **extra_env: str) -> str:
+    """Serialize the private remote environment for stdin-only staging."""
+    env_map = {"HERMES_RPC_DIR": rpc_dir, "HERMES_RPC_TOKEN": rpc_token,
+               "PYTHONDONTWRITEBYTECODE": "1", **extra_env}
+    tz = get_timezone_name()
+    if tz:
+        env_map["TZ"] = tz
+    return "".join(f"{k}={shlex.quote(v)}\n" for k, v in env_map.items())
+
+
 def _ship_env_file_and_launch(env, remote_dir: str, env_name: str, launch: str, *,
                               rpc_dir: str, rpc_token: str, **extra_env: str) -> str:
     """Ship the sandbox env (RPC dir + token, PYTHONDONTWRITEBYTECODE, the routed
@@ -477,12 +487,7 @@ def _ship_env_file_and_launch(env, remote_dir: str, env_name: str, launch: str, 
     them into every later command on the backend (the #71296 snapshot-leak
     class). The token also stays off the remote shell's argv, which co-tenant
     users can read via ps for the command's lifetime."""
-    env_map = {"HERMES_RPC_DIR": rpc_dir, "HERMES_RPC_TOKEN": rpc_token,
-               "PYTHONDONTWRITEBYTECODE": "1", **extra_env}
-    tz = get_timezone_name()  # routed profile's timezone, not the bridged default's
-    if tz:
-        env_map["TZ"] = tz
-    lines = "".join(f"{k}={shlex.quote(v)}\n" for k, v in env_map.items())
+    lines = _remote_env_content(rpc_dir, rpc_token, **extra_env)
     _ship_file_to_remote(env, f"{remote_dir}/{env_name}", lines)
     return (f"cd {shlex.quote(remote_dir)} && "
             f"( set -a && . ./{env_name} && set +a && {launch} )")
@@ -665,9 +670,11 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
     timeout, max_tool_calls = _cfg.get("timeout", DEFAULT_TIMEOUT), _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
     sandbox_tools, effective_task_id = _sandbox_tools_for(enabled_tools), task_id or "default"
     env, env_type = _get_or_create_env(effective_task_id)
+    from tools.environments.supervised_execution import current_job_supervision
+    supervised = current_job_supervision() is not None
     exec_start = time.monotonic()
     try:
-        py_check = env.execute("command -v python3 >/dev/null 2>&1 && echo OK", cwd="/", timeout=15)
+        py_check = env.execute("command -v python3 >/dev/null 2>&1 && echo OK", cwd="/", timeout=15) if env_type != "local" else {"output": "OK"}
         if "OK" not in py_check.get("output", ""):
             return _error_result(f"Python 3 is not available in the {env_type} terminal "
                                  "environment. Install Python to use execute_code with remote backends.")
@@ -686,6 +693,8 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
                 idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
             )
         except Exception:
+            if supervised:
+                raise  # Lost acknowledgement cannot authorize a second execution.
             logger.warning("remote session-kernel path failed; falling back to per-call", exc_info=True)
             kernel_result = None
         if kernel_result is not None:
@@ -779,7 +788,8 @@ def execute_code(
     if _guard.get("user_approved"):
         from tools.interrupt import clear_current_thread_interrupt
         clear_current_thread_interrupt()
-    if env_type != "local":
+    from tools.environments.supervised_execution import current_job_supervision
+    if env_type != "local" or current_job_supervision() is not None:
         return _execute_remote(code, task_id, enabled_tools, reset=bool(reset))
     from tools.interrupt import is_interrupted as _is_interrupted
     # Session kernels are always on locally (one interpreter per conversation); the guards above

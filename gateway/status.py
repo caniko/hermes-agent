@@ -742,6 +742,20 @@ def gateway_spawn_intent_subcommand(command: str | None) -> str | None:
     flag_index = inline_source_flag_index(cased_tokens)
     if flag_index is None:
         return None
+    # Long supervised shell commands contain many data operands. None of their
+    # suffixes can match the canonical entrypoint rules without one of these
+    # tokens. Reject that case in one scan instead of re-tokenizing every suffix.
+    # Positive candidates still go through the full matcher below.
+    remaining = [token.lower() for token in cased_tokens[flag_index + 2:]]
+    if not any(
+        "hermes_cli.main" in token or "hermes_cli/main.py" in token
+        or token == "gateway/run.py" or token.endswith("/gateway/run.py")
+        or token.rsplit("/", 1)[-1] in {
+            "desktop-gateway.py", "hermes-gateway", "hermes-gateway.exe", "hermes", "hermes.exe",
+        }
+        for token in remaining
+    ):
+        return None
     # Skip the interpreter, its options, ``-c`` and the source literal; then try every suffix —
     # the embedded argv starts at an unknown offset (the watcher prefixes it with the old PID).
     start = flag_index + 2

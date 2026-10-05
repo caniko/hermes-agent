@@ -88,9 +88,22 @@ def _stamp_gateway_routing(proc_session, get_session_env) -> None:
 
 def _spawn(process_registry, *, env, env_type, command, cwd, effective_task_id, task_id,
            session_key, effective_pty, persist_on_release: bool = False):
+    from tools.environments.supervised_execution import current_job_supervision
+
     common = dict(command=command, cwd=cwd, task_id=effective_task_id,
                   owner_task_id=task_id or effective_task_id, session_key=session_key,
                   persist_on_release=persist_on_release)
+    if current_job_supervision() is not None:
+        import shlex
+
+        if effective_pty:
+            raise ValueError("Supervised background jobs currently require pipe mode")
+        proc = env._run_bash(f"cd -- {shlex.quote(cwd)} && {command}", login=True,
+                             wait_for_descendants=True)
+        return process_registry.adopt_local(
+            proc, command=command, cwd=cwd, task_id=effective_task_id,
+            session_key=session_key, owner_task_id=task_id or effective_task_id,
+            notify_on_complete=False)
     if env_type == "local":
         return process_registry.spawn_local(
             env_vars=env.env if hasattr(env, 'env') else None, use_pty=effective_pty, **common)
@@ -250,6 +263,9 @@ def yield_to_background_handler(
 
     def _handler(proc, output_so_far: str) -> dict:
         from tools.process_registry import process_registry
+        from tools.environments.supervised_execution import SupervisedProcessHandle
+        if isinstance(proc, SupervisedProcessHandle):
+            proc.wait_for_descendants = True
         session = process_registry.adopt_local(
             proc, command=command, cwd=cwd, task_id=effective_task_id,
             owner_task_id=task_id or effective_task_id, session_key=session_key,

@@ -150,6 +150,29 @@ def test_spawn_intent_ignores_inline_source_without_a_gateway_argv():
     assert spawn_intent('python -c "import time; time.sleep(1)" 14980') is None
 
 
+def test_spawn_intent_does_not_reparse_every_shell_data_suffix(monkeypatch):
+    import shlex
+    from types import SimpleNamespace
+
+    from gateway import status
+
+    parsed_sizes = []
+    split = shlex.split
+
+    def measured_split(command, **kwargs):
+        parsed_sizes.append(len(command))
+        return split(command, **kwargs)
+
+    monkeypatch.setattr(status, "shlex", SimpleNamespace(split=measured_split))
+    # Supervision batches can carry many paths and shell operands. A directory
+    # mentioning gateway is not an executable entrypoint or launch intent.
+    command = 'bash --noprofile --norc -c "echo settled" job ' + " ".join(
+        f"/var/lib/gateway-fixture/job-{value:032x}/fence/stopped" for value in range(128)
+    )
+    assert spawn_intent(command) is None
+    assert sum(parsed_sizes) <= 3 * len(command)
+
+
 # Atomic Hermes' bundled desktop runner (regression for #22418): it shares
 # HERMES_HOME with the CLI and must be recognised as a gateway so
 # ``gateway run --replace`` enters the replace/lock-handoff path instead of
@@ -163,5 +186,4 @@ ATOMIC_DESKTOP = (
 def test_accepts_atomic_desktop_gateway():
     assert matches(ATOMIC_DESKTOP) is True
     assert matches_runtime(ATOMIC_DESKTOP) is True
-
 

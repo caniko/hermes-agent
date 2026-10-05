@@ -56,7 +56,8 @@ _BUILTIN_BACKENDS = "local, docker, singularity, modal, daytona, vercel_sandbox,
 # Config -> kwargs shapers, driven by (out_key, config_key, default) tables. The container table's
 # (key, default) literal is intentionally greppable; tools/terminal_tool.py keeps its own for the AST test.
 _SSH_KEYS = (("host", "ssh_host", ""), ("user", "ssh_user", ""), ("port", "ssh_port", 22),
-             ("key", "ssh_key", ""), ("persistent", "ssh_persistent", False))
+             ("key", "ssh_key", ""), ("hermes_home", "ssh_hermes_home", ""),
+             ("persistent", "ssh_persistent", False))
 _RESOURCE_KEYS = (("cpu", "container_cpu", 1), ("memory", "container_memory", 5120),
                   ("disk", "container_disk", 51200), ("persistent_filesystem", "container_persistent", True))
 _CONTAINER_KEYS = (
@@ -204,7 +205,8 @@ def _build_ssh_env(*, cwd, timeout, ssh_config, probe_only=False, **_):
     if not ssh_config or not ssh_config.get("host") or not ssh_config.get("user"):
         raise ValueError("SSH environment requires ssh_host and ssh_user to be configured")
     return _SSHEnvironment(host=ssh_config["host"], user=ssh_config["user"], port=ssh_config.get("port", 22),
-                           key_path=ssh_config.get("key", ""), cwd=cwd, timeout=timeout, probe_only=probe_only)
+                           key_path=ssh_config.get("key", ""), cwd=cwd, timeout=timeout, probe_only=probe_only,
+                           hermes_home=ssh_config.get("hermes_home", ""))
 
 
 def _build_plugin_env(*, env_type, image, cwd, timeout, cc, task_id, **_):
@@ -242,6 +244,13 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     for local/ssh/vercel; ``container_config`` carries the container_*/docker_* resource keys; ``host_cwd`` is
     the host dir bound into Docker when cwd mounting is enabled. ``probe_only`` asks ssh for a throwaway
     connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends."""
+    from tools.environments.supervised_execution import current_job_supervision
+
+    binding = current_job_supervision()
+    if binding is not None and binding.supervisor is not None and not probe_only:
+        from tools.environments.owned import OwnedEnvironment
+
+        return OwnedEnvironment(binding, cwd, timeout)
     builder = _ENV_BUILDERS.get(env_type)
     kwargs = dict(image=image, cwd=cwd, timeout=timeout, cc=container_config or {}, task_id=task_id,
                   ssh_config=ssh_config, host_cwd=host_cwd, probe_only=probe_only)

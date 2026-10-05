@@ -220,6 +220,33 @@ Before that stash step, Hermes also restores tracked `package-lock.json` diffs l
 
 ## Terminal Backend Configuration
 
+### Separate SSH worker state
+
+An SSH worker can operate as a data directory's owner while keeping its Hermes
+state separate from that account's personal Hermes installation:
+
+```yaml
+terminal:
+  backend: ssh
+  ssh_host: workstation.example.net
+  ssh_user: alice
+  cwd: /srv/alice/data
+  ssh_hermes_home: /srv/alice/workers/maintenance/hermes
+```
+
+`ssh_hermes_home` is an absolute path on the **remote** machine. It receives the
+profile's synchronized skills, credentials, and cache, and becomes `HERMES_HOME`
+for remote commands. Changes synchronized back go to the originating profile.
+Use a different directory for each independent worker. Newly created state
+directories are private; existing directory permissions are preserved.
+
+Omitting the setting retains the remote login user's `.hermes` directory. The
+setting does not change the SSH login identity, `HOME`, or the workspace's Unix
+permissions. It is state separation, not a filesystem sandbox. Configure worker
+access and any build/cache directories using the remote account or service policy.
+
+### Backend settings
+
 Hermes supports seven terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a remote server via SSH, a Modal cloud sandbox (direct or via the Nous-managed gateway), a Daytona workspace, a Vercel Sandbox, or a Singularity/Apptainer container.
 
 ```yaml

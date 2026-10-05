@@ -132,6 +132,12 @@ json.dump(sorted(leaf_paths(DEFAULT_CONFIG)), sys.stdout, indent=2)
       packages.configKeys = configKeys;
 
       checks = {
+        target-job-lifecycle = import ./job-lifecycle-test.nix {
+          inherit pkgs;
+          package = self'.packages.minimal;
+          source = inputs.self.outPath;
+          revision = inputs.self.rev or null;
+        };
         # Cross-platform evaluation — catches "not supported for interpreter"
         # errors (e.g. sphinx dropping python311) without needing a darwin builder.
         # Evaluation is pure and instant; it doesn't build anything.

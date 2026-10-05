@@ -500,6 +500,13 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
        keys its own home (``profile:<name>`` under persistent Docker, matching branch 3);
        else ``"default"``, which subagent ids collapse onto to share the parent's container.
     """
+    from tools.environments.supervised_execution import current_job_supervision
+
+    binding = current_job_supervision()
+    if binding is not None and binding.supervisor is not None:
+        # A resumed conversation must never inherit an environment bound to the
+        # previous grant, even when it points at the same canonical directory.
+        return f"owned:{binding.state_dir}"
     if task_id and _has_isolation_overrides(task_id):
         return _qualify_task_key(task_id)
     scope = _session_scope()
@@ -759,6 +766,8 @@ def _get_env_config() -> Dict[str, Any]:
         "ssh_user": _tenv("TERMINAL_SSH_USER", ""),
         "ssh_port": _parse_env_var("TERMINAL_SSH_PORT", "22"),
         "ssh_key": _tenv("TERMINAL_SSH_KEY", ""),
+        "ssh_hermes_home": _tenv("TERMINAL_SSH_HERMES_HOME", ""),
+        "filesystem_authority": _parse_env_var("TERMINAL_FILESYSTEM_AUTHORITY", "{}", json.loads, "object"),
         # Persistent shell: SSH defaults to the config-level persistent_shell
         # setting; local is always opt-in. Per-backend env vars override.
         "ssh_persistent": _tenv_bool(
@@ -1240,7 +1249,10 @@ def _run_foreground(
     workdir: Optional[str], approval_note: Optional[str], clear_interrupt: bool,
 ) -> str:
     """Execute in the foreground with retry on transient errors, then finalize."""
-    max_retries = 3
+    from tools.environments.supervised_execution import current_job_supervision
+    # A lost supervisor acknowledgement may hide an admitted job. Its receipt,
+    # not another execution of the command, resolves that uncertainty.
+    max_retries = 0 if current_job_supervision() is not None else 3
     env_type, eff, effective_timeout = plan.env_type, plan.effective_task_id, plan.effective_timeout
 
     # Clean interrupt slate for an approved command, ONCE before the retry

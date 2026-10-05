@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import posixpath
 import shlex
 import shutil
 import subprocess
@@ -57,7 +58,11 @@ class SSHEnvironment(BaseEnvironment):
 
     def __init__(self, host: str, user: str, cwd: str = "~",
                  timeout: int = 60, port: int = 22, key_path: str = "",
-                 probe_only: bool = False):
+                 probe_only: bool = False, hermes_home: str = ""):
+        if hermes_home and (not posixpath.isabs(hermes_home) or "\0" in hermes_home
+                            or posixpath.normpath(hermes_home).strip("/") == ""):
+            raise ValueError("terminal.ssh_hermes_home must be an absolute remote directory other than /")
+        self._configured_hermes_home = posixpath.normpath(hermes_home) if hermes_home else ""
         super().__init__(cwd=cwd, timeout=timeout)
         self.host, self.user, self.port, self.key_path = host, user, port, key_path
         self.control_dir = Path(tempfile.gettempdir()) / "hermes-ssh"
@@ -67,6 +72,9 @@ class SSHEnvironment(BaseEnvironment):
         # stability across reconnects keeps ControlMaster reuse working. A probe gets its own
         # per-instance socket so its cleanup() can never close the agent's shared master.
         socket_key = f"{user}@{host}:{port}"
+        if self._configured_hermes_home:
+            # A worker's teardown must not close another worker's master.
+            socket_key += f":home:{self._configured_hermes_home}"
         if probe_only:
             socket_key = f"{socket_key}:probe:{self._session_id}"
         _socket_id = hashlib.sha256(socket_key.encode()).hexdigest()[:16]
@@ -78,9 +86,10 @@ class SSHEnvironment(BaseEnvironment):
             return
         self._remote_home_detected = False
         self._remote_home = self._detect_remote_home()
+        self._remote_hermes_home = self._configured_hermes_home or f"{self._remote_home}/.hermes"
         self._ensure_remote_dirs()
         self._sync_manager = FileSyncManager(
-            get_files_fn=lambda: iter_sync_files(f"{self._remote_home}/.hermes"),
+            get_files_fn=lambda: iter_sync_files(self._remote_hermes_home),
             upload_fn=self._scp_upload, delete_fn=self._ssh_delete,
             bulk_upload_fn=self._ssh_bulk_upload, bulk_download_fn=self._ssh_bulk_download)
         self._sync_manager.sync(force=True)
@@ -159,10 +168,11 @@ class SSHEnvironment(BaseEnvironment):
         return "/root" if self.user == "root" else f"/home/{self.user}"
 
     def _ensure_remote_dirs(self) -> None:
-        """Create base ~/.hermes directory tree on remote in one SSH call."""
-        base = f"{self._remote_home}/.hermes"
-        self._run_ssh(quoted_mkdir_command([base, f"{base}/skills", f"{base}/credentials", f"{base}/cache"]),
-                      timeout=10)
+        """Keep newly created worker state private without changing existing directory modes."""
+        base = self._remote_hermes_home
+        self._run_ssh_checked(
+            "umask 077; " + quoted_mkdir_command([base, f"{base}/skills", f"{base}/credentials", f"{base}/cache"]),
+            10, "remote mkdir failed", f"Remote directory setup on {self.host}")
 
     def _scp_upload(self, host_path: str, remote_path: str) -> None:
         """Upload a single file via scp over ControlMaster."""
@@ -178,7 +188,7 @@ class SSHEnvironment(BaseEnvironment):
         connection to remote ``tar x``, after a single batched ``mkdir -p``."""
         if not files:
             return
-        base = f"{self._remote_home}/.hermes"
+        base = self._remote_hermes_home
         parents = unique_parent_dirs(files)
         if parents:
             self._run_ssh_checked(quoted_mkdir_command(parents), 30, "remote mkdir failed",
@@ -245,7 +255,7 @@ class SSHEnvironment(BaseEnvironment):
         """Download remote .hermes/ as a tar archive."""
         # Tar from / with the full path so archive entries keep absolute paths
         # (home/user/.hermes/skills/f.py), matching _pushed_hashes keys.
-        rel_base = f"{self._remote_home}/.hermes".lstrip("/")
+        rel_base = self._remote_hermes_home.lstrip("/")
         # Live sockets inside .hermes (gateway.sock and friends) cannot be archived: tar prints
         # "socket ignored" and some builds exit 2, which failed every sync-back and left a
         # multi-GB temp tar behind on each retry. Exclude them up front.
@@ -274,14 +284,24 @@ class SSHEnvironment(BaseEnvironment):
             self._sync_manager.sync()  # rate-limited internally
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
-                  stdin_data: str | None = None) -> subprocess.Popen:
+                  stdin_data: str | None = None, wait_for_descendants: bool = False) -> subprocess.Popen:
         """Forward the passthrough allowlist (skill ``required_environment_variables`` +
         ``terminal.env_passthrough``) the way docker does: ``SendEnv`` carries the names, the ssh
         client's env carries the values, so secrets never enter the remote ``bash -c`` argv. The
         remote sshd must ``AcceptEnv`` them (#14091). Profile-scoped names missing from the active
         scope are unset remotely so a shared host cannot serve another profile's value."""
         values, unset_names = resolve_passthrough_env(hermes_env_loader=_load_hermes_env_vars)
-        cmd = self._build_ssh_command(send_env=values) + bash_argv(shlex.quote(prepend_unset(cmd_string, unset_names)), login)
+        from tools.environments.supervised_execution import (
+            SupervisedProcessHandle, current_job_supervision, ssh_supervisor)
+        command = prepend_unset(cmd_string, unset_names)
+        if self._configured_hermes_home:
+            command = f"export HERMES_HOME={shlex.quote(self._remote_hermes_home)}; {command}"
+        if binding := current_job_supervision():
+            supervisor = ssh_supervisor(binding, self, values)
+            job = supervisor.start(shlex.join(["bash", *(["-l"] if login else []), "-c", command]),
+                                   cwd=self.cwd, environment_names=("PATH", "HOME", *values), stdin=stdin_data)
+            return SupervisedProcessHandle(supervisor, job, wait_for_descendants=wait_for_descendants)
+        cmd = self._build_ssh_command(send_env=values) + bash_argv(shlex.quote(command), login)
         client_env = client_env_with(values)
         return _popen_bash(cmd, stdin_data, env=client_env) if client_env is not None else _popen_bash(cmd, stdin_data)
 
