@@ -181,6 +181,12 @@ class RunIdempotencyStore:
                 created_at REAL NOT NULL
             )"""
         )
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS run_stops (
+                run_id TEXT PRIMARY KEY,
+                requested_at REAL NOT NULL
+            )"""
+        )
         self._conn.commit()
         self._lock = threading.Lock()
         self._tighten_permissions()
@@ -267,6 +273,19 @@ class RunIdempotencyStore:
                     (stale_scope, stale_key),
                 ).fetchone()
                 if run_row is not None:
+                    # Lineage links and cancellation tombstones remain replay
+                    # authority even after a parent's transport retention expires.
+                    obligated = self._conn.execute(
+                        """SELECT 1 FROM run_stops WHERE run_id=?
+                           UNION ALL SELECT 1 FROM run_recovery
+                             WHERE parent_run_id=? OR successor_run_id=?
+                           UNION ALL SELECT 1 FROM run_approvals
+                             WHERE run_id=? AND (state='pending' OR dispatch_state!='completed')
+                           LIMIT 1""",
+                        (run_row[0], run_row[0], run_row[0], run_row[0]),
+                    ).fetchone()
+                    if obligated is not None:
+                        continue
                     self._conn.execute("DELETE FROM run_events WHERE run_id=?", (run_row[0],))
                     self._conn.execute("DELETE FROM run_approvals WHERE run_id=?", (run_row[0],))
                     self._conn.execute("DELETE FROM run_launches WHERE run_id=?", (run_row[0],))
@@ -307,6 +326,44 @@ class RunIdempotencyStore:
             row = self._conn.execute(
                 "SELECT 1 FROM run_idempotency WHERE scope=? AND run_id=?", (scope, run_id)).fetchone()
         return row is not None
+
+    def _stop_requested_locked(self, run_id: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM run_stops WHERE run_id=?", (run_id,)
+        ).fetchone() is not None
+
+    def stop_requested(self, run_id: str) -> bool:
+        """Private execution fence, checked independently of pollable status."""
+        with self._lock:
+            return self._stop_requested_locked(run_id)
+
+    def stop_lineage(self, scope: str, run_id: str) -> list[str] | None:
+        """Fence the authenticated run and every linked ancestor/successor.
+
+        The same write transaction serializes with successor reservation and
+        dispatch. A reservation winning first is included; one losing cannot
+        create a new successor. Status remains the executor's settlement proof.
+        """
+        with self._immediate_txn():
+            runs = self._conn.execute(
+                """WITH RECURSIVE lineage(run_id) AS (
+                     SELECT run_id FROM run_idempotency WHERE scope=? AND run_id=?
+                     UNION
+                     SELECT CASE WHEN r.parent_run_id=l.run_id
+                                 THEN r.successor_run_id ELSE r.parent_run_id END
+                       FROM run_recovery r JOIN lineage l
+                         ON r.parent_run_id=l.run_id OR r.successor_run_id=l.run_id
+                   )
+                   SELECT r.run_id FROM lineage l JOIN run_idempotency r
+                     ON r.run_id=l.run_id WHERE r.scope=?""",
+                (scope, run_id, scope),
+            ).fetchall()
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO run_stops(run_id,requested_at) VALUES(?,?)",
+                [(row[0], time.time()) for row in runs],
+            )
+            self._conn.commit()
+        return [str(row[0]) for row in runs] if runs else None
 
     def update_status(self, run_id: str, status: Dict[str, Any]) -> None:
         with self._lock:
@@ -591,6 +648,9 @@ class RunIdempotencyStore:
             if row is None:
                 self._conn.commit()
                 return "missing", None
+            if self._stop_requested_locked(run_id):
+                self._conn.commit()
+                return "stopped", None
             state, stored_choice, stored_applied, stored_resolved = row
             if state != "pending":
                 receipt = {
@@ -634,7 +694,10 @@ class RunIdempotencyStore:
     def mark_tool_dispatching(self, run_id: str, request_id: str) -> bool:
         """Close the safe replay window before the approved tool can have effects."""
         now = time.time()
-        with self._lock:
+        with self._immediate_txn():
+            if self._stop_requested_locked(run_id):
+                self._conn.commit()
+                return False
             changed = self._conn.execute(
                 """UPDATE run_approvals
                       SET dispatch_state='dispatching',dispatch_started_at=?
@@ -753,6 +816,10 @@ class RunIdempotencyStore:
             if parent is None:
                 self._conn.commit()
                 raise KeyError(parent_run_id)
+            if self._stop_requested_locked(parent_run_id) or json.loads(parent[3]).get("status") == "cancelled":
+                self._conn.commit()
+                return {"created": False, "scope": scope, "parent_run_id": parent_run_id,
+                        "successor_run_id": None, "state": "cancelled"}
             existing = self._conn.execute(
                 "SELECT successor_run_id,request_id,state FROM run_recovery WHERE parent_run_id=?",
                 (parent_run_id,),

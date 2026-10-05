@@ -15,6 +15,83 @@ def _reserve(store: RunIdempotencyStore, scope: str = "scope-a", run_id: str = "
     )
 
 
+def _freeze_approved_call(store):
+    _reserve(store)
+    store.save_run_launch("run-a", {"session_id": "session-a", "agent_kwargs": {}})
+    store.record_approval_request(
+        "run-a", {"run_id": "run-a", "status": "waiting_for_approval"},
+        {"event": "approval.request", "request_id": "approval-a"},
+        tool={"tool_call_id": "call-a", "tool_name": "terminal", "tool_args": {"command": "probe"}},
+    )
+    assert store.resolve_approval(
+        "scope-a", "run-a", "approval-a", "once", applied=False, resolved=0
+    )[0] == "created"
+
+
+@pytest.mark.parametrize("reserved", [False, True])
+def test_lineage_stop_survives_restart_and_blocks_recovery(tmp_path, reserved):
+    path = tmp_path / "runs.db"
+    store = RunIdempotencyStore(str(path))
+    _freeze_approved_call(store)
+    if reserved:
+        store.reserve_recovery_successor("scope-a", "run-a", successor_run_id="run-b")
+    assert store.stop_lineage("scope-b", "run-a") is None
+    assert not store.stop_requested("run-a")
+    stopped = store.stop_lineage("scope-a", "run-a")
+    assert set(stopped) == ({"run-a", "run-b"} if reserved else {"run-a"})
+    store.close()
+    reopened = RunIdempotencyStore(str(path))
+    try:
+        assert reopened.stop_requested("run-a")
+        if reserved:
+            assert reopened.stop_requested("run-b")
+        plan = reopened.reserve_recovery_successor("scope-a", "run-a", successor_run_id="run-c")
+        assert plan["state"] == "cancelled"
+        assert not reopened.mark_tool_dispatching("run-a", "approval-a")
+        # Neither retention expiry nor a late status callback can drop the fence.
+        reopened.update_status("run-a", {"run_id": "run-a", "status": "cancelled"})
+        reopened._conn.execute("UPDATE run_idempotency SET updated_at=0,retention_until=1")
+        reopened._conn.commit()
+        reopened.reserve("scope-a", "other-key", "other-fingerprint", "other-run", {"status": "running"})
+        assert reopened.owns_run("scope-a", "run-a")
+        assert reopened.reserve_recovery_successor("scope-a", "run-a", successor_run_id="run-c")["state"] == "cancelled"
+    finally:
+        reopened.close()
+
+
+def test_stop_and_recovery_reservations_serialize_across_store_connections(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    path = tmp_path / "runs.db"
+    owner, controller = RunIdempotencyStore(str(path)), RunIdempotencyStore(str(path))
+    _freeze_approved_call(owner)
+    barrier = Barrier(2)
+
+    def stop():
+        barrier.wait(timeout=5)
+        return controller.stop_lineage("scope-a", "run-a")
+
+    def recover():
+        barrier.wait(timeout=5)
+        return owner.reserve_recovery_successor("scope-a", "run-a", successor_run_id="run-b")
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            stop_work, recover_work = pool.submit(stop), pool.submit(recover)
+            stopped, plan = stop_work.result(timeout=10), recover_work.result(timeout=10)
+        assert "run-a" in stopped
+        assert plan["state"] in {"recovery_pending", "cancelled"}
+        if plan["created"]:
+            assert "run-b" in stopped
+            assert owner.stop_requested("run-b")
+        assert not owner.mark_tool_dispatching("run-a", "approval-a")
+        assert owner.reserve_recovery_successor("scope-a", "run-a", successor_run_id="run-c")["state"] == "cancelled"
+    finally:
+        owner.close()
+        controller.close()
+
+
 def test_run_events_replay_after_store_reopen_without_duplicates(tmp_path):
     """Contract: an idempotent run's event cursor survives gateway replacement.
 
