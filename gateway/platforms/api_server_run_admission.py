@@ -21,12 +21,13 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
     try:
         body = await request.json()
         if not isinstance(body, dict) or "hosted_room_dispatch" in body:
-            raise ValueError("Stopping an admission requires the original execution-context request")
+            raise ValueError("Stopping an admission requires the original run request")
         context = body.get("execution_context")
-        validate_execution_context(context)
+        if context is not None:
+            validate_execution_context(context)
         key, fingerprint = request_identity(body, session_key, request.headers.get("Idempotency-Key", ""))
-        if not key or context.get("lifetime") != "wait_for_jobs" or not adapter._run_idempotency_store.durable:
-            raise ValueError("Stopping an admission requires wait_for_jobs, Idempotency-Key and durable storage")
+        if not key or not adapter._run_idempotency_store.durable:
+            raise ValueError("Stopping an admission requires Idempotency-Key and durable storage")
     except (ValueError, TypeError) as exc:
         return _json_error(api._openai_error, str(exc), code="invalid_run_admission_stop", status=400)
 
@@ -34,7 +35,8 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
     now = time.time()
     run_id = f"run_{uuid.uuid4().hex}"
     cancelled = {"object": "hermes.run", "run_id": run_id, "status": "cancelled",
-                 "created_at": now, "updated_at": now, "execution_context": context,
+                  "created_at": now, "updated_at": now,
+                  **({"execution_context": context} if context is not None else {}),
                  "last_event": "run.cancelled", "admission_cancelled": True}
     # Reserve uses the same unique key and transaction as create. A create that
     # was waiting on history/config I/O must observe this tombstone at reserve.

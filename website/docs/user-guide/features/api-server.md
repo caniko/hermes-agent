@@ -640,6 +640,25 @@ Bot Chat owner; reconnecting clients receive the same terminal event as status p
 
 ### POST /v1/runs/\{run_id\}/stop
 
+For durable runs, Stop fences the entire recovery lineage, including successors
+of a terminal `superseded` parent. The receipt contains `stop_requested`, a
+`lineage` of run identities and statuses, and `lineage_settled`. Only
+`lineage_settled: true` proves that every admitted executor has settled; a Stop
+request itself is not settlement. Another gateway process sharing the run store
+observes the same fence, and later approval or dispatch cannot cross it.
+
+`POST /v1/runs/stop` accepts the original create body, `Idempotency-Key`, and
+session headers. It cancels an admission even when the create acknowledgement
+was lost or the create request has not arrived. It requires durable run storage
+and supports ordinary runs as well as `wait_for_jobs` runs. Capability discovery
+advertises these contracts under `features.runs_recovery`.
+
+Unsettled runs, recovery plans, and stop obligations survive transport expiry
+and retention sweeps. Store upgrades add the stop table without replacing
+existing run, event, or approval rows. Before rolling back to a version without
+lineage Stop, settle all pending admissions and successors: an older executable
+cannot enforce the new stop fence, even though its database remains readable.
+
 Interrupt a running agent turn. The endpoint returns immediately with `{"status": "stopping"}` while Hermes asks the active agent to stop at the next safe interruption point.
 The run stays tracked as `stopping` until the executor-backed work exits, then
 settles as `cancelled`; requesting stop never hides a worker that is still

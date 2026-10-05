@@ -17,7 +17,11 @@ from hermes_state import SessionDB
 
 
 @pytest.fixture
-def recovery(tmp_path):
+def recovery(tmp_path, request, monkeypatch):
+    bound = getattr(request, "param", None) == "bound"
+    if bound:
+        (tmp_path / "config.yaml").write_text(f"terminal:\n  backend: local\n  cwd: {tmp_path}\n")
+        monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda profile: tmp_path)
     adapter = api_server.APIServerAdapter(
         PlatformConfig(enabled=True, extra={"key": "recovery-test-key"})
     )
@@ -38,6 +42,7 @@ def recovery(tmp_path):
                   {"run_id": parent, "status": "waiting_for_approval"})
     store.save_run_launch(parent, {
         "session_id": session_id, "agent_kwargs": {}, "request_profile": "default",
+        **({"execution_context": {"version": 1, "backend": "local", "cwd": str(tmp_path)}} if bound else {}),
     })
     store.record_approval_request(
         parent, {"run_id": parent, "status": "waiting_for_approval"},
@@ -58,10 +63,12 @@ def recovery(tmp_path):
     adapter._create_agent = MagicMock(side_effect=agents)
     app = web.Application()
     app.router.add_post("/v1/runs/{run_id}/stop", adapter._handle_stop_run)
+    app.router.add_post("/v1/runs/{run_id}/approval", adapter._handle_run_approval)
     app.router.add_get("/v1/runs/{run_id}", adapter._handle_get_run)
     yield SimpleNamespace(
         adapter=adapter, store=store, db=db, path=path, scope=scope, plan=plan,
         parent=parent, run_id=run_id, session_id=session_id, agents=agents, app=app, headers=headers,
+        cwd=str(tmp_path),
     )
     store.close()
     db.close()
@@ -219,3 +226,177 @@ async def test_task_cancellation_retains_worker_and_dispatch_evidence(recovery, 
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 10)
         if phase != "before_start" and reached.is_set():
             await asyncio.wait_for(exited.wait(), 10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery", ["bound"], indirect=True)
+@pytest.mark.parametrize("drift", [False, True], ids=["retained-context", "changed-worker"])
+async def test_recovery_preserves_admitted_execution_context(recovery, monkeypatch, tmp_path, drift):
+    from tools.terminal_scope import get_terminal_scope
+
+    case = recovery
+    if drift:
+        changed = tmp_path / "different-workspace"
+        changed.mkdir()
+        (tmp_path / "config.yaml").write_text(f"terminal:\n  backend: local\n  cwd: {changed}\n")
+    seen = []
+
+    def invoke(*args, **kwargs):
+        seen.append(get_terminal_scope()["TERMINAL_CWD"])
+        return "pinned tool"
+
+    def final(**kwargs):
+        seen.append(get_terminal_scope()["TERMINAL_CWD"])
+        return {"final_response": "pinned final"}
+
+    monkeypatch.setattr("agent.agent_runtime_helpers.invoke_tool", invoke)
+    case.agents[1].run_conversation.side_effect = final
+    assert _schedule_recovery_run(case.adapter, case.plan, _api_server=api_server)
+    task = case.adapter._active_run_tasks[case.run_id]
+    await asyncio.wait_for(asyncio.shield(task), 10)
+    status = case.store.status_for_run(case.scope, case.run_id)["status"]
+    assert status["status"] == ("failed" if drift else "completed")
+    assert seen == ([] if drift else [case.cwd, case.cwd])
+    if drift:
+        case.adapter._create_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_terminal_parent_stop_is_durable_and_rejects_delayed_approval(recovery):
+    case = recovery
+    async with TestClient(TestServer(case.app)) as client:
+        stopped = await client.post(f"/v1/runs/{case.parent}/stop", headers=case.headers)
+        assert stopped.status == 200
+        assert case.store.stop_requested(case.parent)
+        assert case.store.stop_requested(case.run_id)
+        case.store.close()
+        case.store = case.adapter._run_idempotency_store = RunIdempotencyStore(str(case.path))
+        approval = await client.post(f"/v1/runs/{case.parent}/approval", headers=case.headers,
+                                     json={"request_id": "approval-a", "choice": "once"})
+        assert approval.status == 409
+        assert (await approval.json())["error"]["code"] == "run_stopped"
+        assert not _schedule_recovery_run(case.adapter, case.plan, _api_server=api_server)
+        case.adapter._create_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_live_successor_observes_stop_from_independent_store(recovery, monkeypatch):
+    case = recovery
+    reached = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def invoke(agent, *args, **kwargs):
+        loop.call_soon_threadsafe(reached.set)
+        assert agent.interrupted.wait(10)
+        return "settled independent stop"
+
+    monkeypatch.setattr("agent.agent_runtime_helpers.invoke_tool", invoke)
+    assert _schedule_recovery_run(case.adapter, case.plan, _api_server=api_server)
+    task = case.adapter._active_run_tasks[case.run_id]
+    await asyncio.wait_for(reached.wait(), 10)
+    other = RunIdempotencyStore(str(case.path))
+    try:
+        assert case.run_id in other.stop_lineage(case.scope, case.parent)
+        await asyncio.wait_for(asyncio.shield(task), 10)
+        assert other.status_for_run(case.scope, case.run_id)["status"]["status"] == "cancelled"
+        case.agents[1].run_conversation.assert_not_called()
+    finally:
+        case.agents[0].interrupted.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 10)
+        other.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery", ["bound"], indirect=True)
+@pytest.mark.parametrize("cancel", [False, True], ids=["http-stop", "task-cancel"])
+async def test_stop_during_recovery_ownership_preparation_retains_settlement(recovery, monkeypatch, cancel):
+    from gateway.platforms.api_server_job_lifetime import RunJobLifetime
+    from tools.environments.filesystem_supervisor import OwnershipPending
+    from tools.environments.supervised_execution import SupervisionBinding
+
+    case = recovery
+    case.plan["launch"]["execution_context"]["lifetime"] = "wait_for_jobs"
+    entered, collecting, collected = asyncio.Event(), asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    supervisor = MagicMock()
+
+    def prepare():
+        loop.call_soon_threadsafe(entered.set)
+        raise OwnershipPending("another claim holds the selected directory")
+
+    def settled():
+        loop.call_soon_threadsafe(collecting.set)
+        return collected.is_set()
+
+    supervisor.prepare.side_effect = prepare
+    supervisor.settled.side_effect = settled
+    lifetime = RunJobLifetime(SupervisionBinding(case.cwd), supervisor)
+    monkeypatch.setattr("gateway.platforms.api_server_recovery_execution_context.create_job_lifetime",
+                        lambda *args: lifetime)
+    assert _schedule_recovery_run(case.adapter, case.plan, _api_server=api_server)
+    task = case.adapter._active_run_tasks[case.run_id]
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        async with TestClient(TestServer(case.app)) as client:
+            if cancel:
+                task.cancel()
+            else:
+                receipt = await (await client.post(f"/v1/runs/{case.parent}/stop", headers=case.headers)).json()
+                assert receipt["lineage_settled"] is False
+            await asyncio.wait_for(collecting.wait(), 10)
+            assert not task.done()
+            case.adapter._create_agent.assert_not_called()
+            assert lifetime.prepared
+            task.cancel()
+            collected.set()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 10)
+            receipt = await (await client.post(f"/v1/runs/{case.parent}/stop", headers=case.headers)).json()
+            assert receipt["lineage_settled"] is True
+            assert case.store.stop_requested(case.run_id)
+            assert case.store.status_for_run(case.scope, case.run_id)["status"]["status"] == "cancelled"
+    finally:
+        collected.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_tool", [False, True], ids=["before-dispatch", "live-tool"])
+async def test_stop_terminal_parent_joins_live_successor(recovery, monkeypatch, during_tool):
+    case = recovery
+    reached, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    original = case.adapter._ensure_session_db_async
+
+    async def database():
+        if not during_tool:
+            reached.set()
+            assert await asyncio.to_thread(release.wait, 10)
+        return await original()
+
+    def invoke(agent, *args, **kwargs):
+        loop.call_soon_threadsafe(reached.set)
+        assert release.wait(10)
+        assert agent.interrupted.is_set()
+        return "stopped tool"
+
+    monkeypatch.setattr(case.adapter, "_ensure_session_db_async", database)
+    monkeypatch.setattr("agent.agent_runtime_helpers.invoke_tool", invoke)
+    assert _schedule_recovery_run(case.adapter, case.plan, _api_server=api_server)
+    task = case.adapter._active_run_tasks[case.run_id]
+    try:
+        await asyncio.wait_for(reached.wait(), 10)
+        async with TestClient(TestServer(case.app)) as client:
+            stopped = await client.post(f"/v1/runs/{case.parent}/stop", headers=case.headers)
+            receipt = await stopped.json()
+            assert stopped.status == 200
+            assert receipt["lineage_settled"] is False
+            assert not task.done()
+            release.set()
+            await asyncio.wait_for(asyncio.shield(task), 10)
+            stopped = await client.post(f"/v1/runs/{case.parent}/stop", headers=case.headers)
+            assert (await stopped.json())["lineage_settled"] is True
+        assert case.store.status_for_run(case.scope, case.run_id)["status"]["status"] == "cancelled"
+        case.agents[1].run_conversation.assert_not_called()
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 10)

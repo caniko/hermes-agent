@@ -2554,6 +2554,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "chat_completions": True, "chat_completions_streaming": True,
                 "responses_api": True, "responses_streaming": True, "run_submission": True,
                 "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
+                "runs_recovery": _api_runs._recovery_capabilities(self),
                 "runs_execution_context": {
                     "version": 1, "backends": ["local", "ssh"], "mode": "precondition",
                     "lifetimes": ["wait_for_jobs"],
@@ -4454,9 +4455,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _handle_steer_run = _run_route_delegate("_handle_steer_run")
     _handle_stop_run = _run_route_delegate("_handle_stop_run")
 
-    async def _handle_stop_admission(self, request: "web.Request") -> "web.Response":
-        from gateway.platforms.api_server_run_admission import stop_admission
-        return await stop_admission(self, request, api=sys.modules[__name__])
+    _handle_stop_admission = _run_route_delegate("_handle_stop_admission")
 
     async def _handle_filesystem_ownership(self, request: "web.Request") -> "web.Response":
         from gateway.platforms.api_server_filesystem_ownership import handle_ownership

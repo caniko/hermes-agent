@@ -14,7 +14,8 @@ from gateway.platforms.api_server import APIServerAdapter
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("when", ["before_create", "during_admission"])
-async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, monkeypatch, when):
+@pytest.mark.parametrize("supervised", [False, True], ids=["ordinary", "supervised"])
+async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, monkeypatch, when, supervised):
     import hermes_yaml as yaml
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -23,6 +24,8 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
         "terminal": {"backend": "local", "cwd": str(tmp_path)}}))
     body = {"input": "maintain directory", "execution_context": {
         "version": 1, "backend": "local", "cwd": str(tmp_path), "lifetime": "wait_for_jobs"}}
+    if not supervised:
+        body.pop("execution_context")
     headers = {"Idempotency-Key": "stop-before-admission", "X-Hermes-Session-Key": "owned-directory",
                "Authorization": "Bearer admission-fixture-key"}
     config = PlatformConfig(enabled=True, extra={"key": "admission-fixture-key"})

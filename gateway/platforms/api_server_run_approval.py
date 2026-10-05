@@ -23,6 +23,13 @@ logger = logging.getLogger("gateway.platforms.api_server")
 _APPROVAL_CHOICE_ALIASES = {"approve": "once", "approved": "once", "allow": "once"}
 
 
+def _approval_outcome_error(outcome, openai_error):
+    errors = {"stopped": ("Run lineage has been stopped.", "run_stopped"),
+              "conflict": ("Approval request already has a different decision.", "approval_decision_conflict")}
+    error = errors.get(outcome)
+    return _json_error(openai_error, error[0], code=error[1], status=409) if error else None
+
+
 async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> "web.Response":
     """POST /v1/runs/{run_id}/approval — resolve a pending run approval."""
     _openai_error = _api_server._openai_error
@@ -79,13 +86,9 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
             applied=False,
             resolved=0,
         )
-        if outcome == "conflict":
-            return _json_error(
-                _openai_error,
-                "Approval request already has a different decision.",
-                code="approval_decision_conflict",
-                status=409,
-            )
+        decision_error = _approval_outcome_error(outcome, _openai_error)
+        if decision_error is not None:
+            return decision_error
         if outcome == "missing" or receipt is None:
             return _json_error(
                 _openai_error, f"Run has no pending approval: {run_id}", code="approval_not_pending", status=409)
@@ -170,7 +173,7 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
                 # Compatibility for receipts written before frozen tool recovery
                 # shipped: retain conflict-safe replay without inventing a tool.
                 recovery = None
-            if recovery is not None and recovery.get("state") != "unrecoverable":
+            if recovery is not None and recovery.get("state") not in {"unrecoverable", "cancelled"}:
                 parent_record = self._run_idempotency_store.status_for_run(scope, run_id)
                 if parent_record is not None:
                     self._run_statuses[run_id] = dict(parent_record["status"])

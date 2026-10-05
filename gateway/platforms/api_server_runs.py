@@ -604,6 +604,7 @@ def _run_task_done(self, run: _RunLaunch, task) -> None:
     self._background_tasks.discard(task)
     # Cancellation before the coroutine's first step never enters its finally.
     if task.cancelled() and self._active_run_tasks.get(run.run_id) is task:
+        self._run_idempotency_store.stop_lineage(self._run_owners[run.run_id], run.run_id)
         status = "interrupted" if run.run_id in self._shutdown_interrupted_run_ids else "cancelled"
         _finish_run(self, run.run_id, status)
         run.put_event(None)
@@ -851,6 +852,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
                         if key != "gateway_session_key"
                     },
                     "request_profile": launch.request_profile,
+                    **({"execution_context": launch.execution_context.requested}
+                       if launch.execution_context is not None else {}),
                 },
             )
         except Exception as exc:
@@ -1105,7 +1108,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             _finish("interrupted")
             return
         self._set_run_status(run_id, "running")
-        if run_id in self._stopping_run_ids:
+        if _run_stop_requested(self, run_id):
             _finish("cancelled")
             return
         with self._profile_scope(run.request_profile), bind_execution_context(run.execution_context):
@@ -1156,26 +1159,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
         execution = _submit_api_worker(
             loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
-        cancelled = False
-        while True:
-            try:
-                result, usage, served_runtime = await asyncio.shield(execution)
-                break
-            except asyncio.CancelledError:
-                if execution.done():
-                    execution.result()  # A worker may itself raise CancelledError.
-                    raise
-                cancelled = True
-                if run_id not in self._stopping_run_ids:
-                    self._stopping_run_ids.add(run_id)
-                    self._set_run_status(run_id, "stopping", last_event="run.stopping")
-                    with suppress(Exception):
-                        _api_server.request_hard_interrupt(agent, "Run task cancelled")
-                # Cancelling an asyncio wrapper cannot stop its executor thread.
-                # Release approval waits, then retain ownership until it settles.
-                _unregister_approval_notify(run.approval_session_key)
-        if cancelled:
-            raise asyncio.CancelledError
+        from gateway.platforms.api_server_run_executor import await_run_executor
+
+        result, usage, served_runtime = await await_run_executor(self, run, agent, execution, api=_api_server)
         if run_id in self._stopping_run_ids and run.job_lifetime is not None:
             _finish("cancelled")
             return
@@ -1199,6 +1185,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                               else "raw_request" if any(requested.values()) else "global"))
             _finish(status, fields, output=result.get("final_response", ""), usage=usage, runtime=served_runtime)
     except asyncio.CancelledError:
+        self._run_idempotency_store.stop_lineage(self._run_owners[run_id], run_id)
         await settle_failed_run(run)
         _finish("cancelled")
         raise
@@ -1482,9 +1469,13 @@ async def _await_recovery_work(self, run_id, work, *, _api_server):
     future = asyncio.ensure_future(work)
     while True:
         try:
-            return await asyncio.shield(future)
+            done, _ = await asyncio.wait([future], timeout=0.1)
+            if done:
+                return future.result()
+            _observe_durable_stop(self, run_id, _api_server=_api_server)
         except asyncio.CancelledError:
             self._stopping_run_ids.add(run_id)
+            self._run_idempotency_store.stop_lineage(self._run_owners[run_id], run_id)
             self._set_run_status(run_id, "stopping", last_event="run.stopping")
             _unregister_approval_notify(run_id)
             agent = self._active_run_agents.get(run_id)
@@ -1514,9 +1505,11 @@ def _schedule_recovery_run(self, plan: Dict[str, Any], *, _api_server) -> bool:
     run_id = str(plan.get("successor_run_id") or "")
     if (
         not run_id
-        or plan.get("state") == "unrecoverable"
+        or plan.get("state") in {"unrecoverable", "cancelled"}
         or run_id in self._recovery_started_run_ids
     ):
+        return False
+    if self._run_idempotency_store.stop_requested(run_id):
         return False
     stored = self._run_idempotency_store.status_for_run(str(plan.get("scope") or ""), run_id)
     if stored is not None and (stored.get("status") or {}).get("status") in TERMINAL_STATUSES:
@@ -1601,7 +1594,7 @@ async def _execute_recovery_run(self, plan: Dict[str, Any], *, q, _api_server) -
         _transition_recovery_run(self, run_id, parent_run_id, status, event_name, **fields)
 
     def _check_stopped() -> None:
-        if run_id in self._stopping_run_ids or run_id in self._shutdown_interrupted_run_ids:
+        if _run_stop_requested(self, run_id) or run_id in self._shutdown_interrupted_run_ids:
             raise _RecoveryStopped()
 
     async def _await(work):
@@ -1617,47 +1610,21 @@ async def _execute_recovery_run(self, plan: Dict[str, Any], *, q, _api_server) -
             )
 
     def _invoke_frozen_tool(agent, history):
-        nonlocal dispatched
-        from agent.agent_runtime_helpers import invoke_tool
-        from gateway.session_context import clear_session_vars
-        resets = []
-        with self._profile_scope(request_profile):
-            try:
-                session_tokens = self._bind_api_server_session(
-                    chat_id=session_id,
-                    session_key=run_id,
-                    session_id=session_id,
-                    profile=request_profile or "",
-                    browser_control_principal=None,
-                    browser_control_transport_family=None,
-                    session_history_delivery="",
-                )
-                if session_tokens:
-                    resets.append(session_tokens)
-                _api_server._publish_turn_process_ownership(agent, session_id)
-                _check_stopped()
-                dispatched = True
-                return invoke_tool(
-                    agent,
-                    str(tool["tool_name"]),
-                    dict(tool["tool_args"]),
-                    session_id,
-                    tool_call_id=str(tool["tool_call_id"]),
-                    messages=history,
-                    pre_tool_block_checked=True,
-                    skip_tool_request_middleware=True,
-                    skip_tool_execution_middleware=True,
-                    approved_recovery=True,
-                )
-            finally:
-                _api_server._clear_turn_process_ownership(agent)
-                for tokens in reversed(resets):
-                    with suppress(Exception):
-                        clear_session_vars(tokens)
+        def dispatch():
+            nonlocal dispatched
+            _check_stopped()
+            dispatched = True
+        return invoke_recovered_tool(self, agent, plan, history, dispatch, _api_server)
 
+    from gateway.platforms.api_server_recovery_execution_context import RecoveryExecutionContext, invoke_recovered_tool
+
+    authority = None
     dispatched = False
     effect_committed = bool(plan.get("tool_result") is not None)
     try:
+        _check_stopped()
+        authority = RecoveryExecutionContext(self, plan)
+        await _await(authority.prepare())
         _check_stopped()
         db = await _await(self._ensure_session_db_async())
         _check_stopped()
@@ -1680,7 +1647,7 @@ async def _execute_recovery_run(self, plan: Dict[str, Any], *, q, _api_server) -
             else:
                 agent_kwargs = dict(launch.get("agent_kwargs") or {})
                 agent_kwargs["session_id"] = session_id
-                with self._profile_scope(request_profile):
+                with authority.scope():
                     tool_agent = self._create_agent(**agent_kwargs)
                 self._active_run_agents[run_id] = tool_agent
                 _check_stopped()
@@ -1698,9 +1665,9 @@ async def _execute_recovery_run(self, plan: Dict[str, Any], *, q, _api_server) -
                     tool=str(tool["tool_name"]),
                     tool_call_id=str(tool["tool_call_id"]),
                 )
-                raw_result = await _await(_submit_api_worker(
-                    loop, lambda: _invoke_frozen_tool(tool_agent, history)
-                ))
+                with authority.scope():
+                    work = _submit_api_worker(loop, lambda: _invoke_frozen_tool(tool_agent, history))
+                raw_result = await _await(work)
                 output = (
                     raw_result
                     if isinstance(raw_result, str)
@@ -1793,7 +1760,9 @@ async def _execute_recovery_run(self, plan: Dict[str, Any], *, q, _api_server) -
                 None,
                 None,
             )
-            with self._profile_scope(request_profile):
+            final_run.execution_context = authority.context
+            final_run.job_lifetime = authority.lifetime
+            with authority.scope():
                 final_agent = self._create_agent(
                     stream_delta_callback=_text_cb,
                     tool_progress_callback=self._make_run_event_callback(run_id, loop),
@@ -1814,7 +1783,9 @@ async def _execute_recovery_run(self, plan: Dict[str, Any], *, q, _api_server) -
                     _api_server=_api_server,
                 )
 
-            result, usage, _served = await _await(_submit_api_worker(loop, _invoke_final))
+            with authority.scope():
+                work = _submit_api_worker(loop, _invoke_final)
+            result, usage, _served = await _await(work)
             _check_stopped()
             if isinstance(result, dict) and result.get("interrupted"):
                 raise _RecoveryStopped()
@@ -1824,16 +1795,21 @@ async def _execute_recovery_run(self, plan: Dict[str, Any], *, q, _api_server) -
                 )
             final_output = str(result.get("final_response") or "")
         _check_stopped()
+        await _await(asyncio.to_thread(authority.settle))
+        _check_stopped()
         _transition("completed", "run.completed", output=final_output, usage=usage, completed=True)
     except _RecoveryStopped:
+        await _settle_recovery_authority(authority, _await)
         _transition("cancelled", "run.cancelled", completed=False)
     except asyncio.CancelledError:
+        await _settle_recovery_authority(authority, _await)
         if dispatched and not effect_committed:
             _transition("unrecoverable", "run.unrecoverable", intervention_reason="tool_effect_uncertain")
         else:
             _transition("cancelled", "run.cancelled", completed=False)
         raise
     except Exception as exc:
+        await _settle_recovery_authority(authority, _await)
         logger.exception("[api_server] durable recovery %s failed", run_id)
         if dispatched and not effect_committed:
             _transition(
@@ -1847,9 +1823,30 @@ async def _execute_recovery_run(self, plan: Dict[str, Any], *, q, _api_server) -
         else:
             _transition("failed", "run.failed", error=_api_server._redact_api_error_text(exc))
     finally:
+        _close_recovery_authority(authority)
         with suppress(Exception):
             q.put_nowait(None)
         _retire_live_run(self, run_id)
+
+
+async def _settle_recovery_authority(authority, wait):
+    if authority is not None:
+        await wait(asyncio.to_thread(authority.settle, True))
+
+
+def _close_recovery_authority(authority):
+    if authority is not None:
+        authority.close()
+
+
+def _recovery_capabilities(self):
+    return {"version": 1, "durable_lineage_stop": self._run_idempotency_store.durable,
+            "ordinary_stop_admission": True, "event_cursor": True}
+
+
+async def _handle_stop_admission(self, request, *, _api_server):
+    from gateway.platforms.api_server_run_admission import stop_admission
+    return await stop_admission(self, request, api=_api_server)
 
 
 async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "web.Response":
@@ -1897,12 +1894,55 @@ async def _handle_stop_run(self, request: "web.Request", *, _api_server) -> "web
 
 
 def _stop_owned_run(self, request, run_id, status, agent, task, *, _api_server):
+    scope = self._run_idempotency_scope(request)
+    lineage = self._run_idempotency_store.stop_lineage(scope, run_id)
+    if lineage is None:
+        return _stop_live_run(self, run_id, status, agent, task, _api_server=_api_server)
+    # The fence commits before waking/interrupting any executor. A terminal
+    # parent is still the controller's authority over its reserved descendants.
+    receipts = []
+    for member in lineage:
+        current = self._durable_run_status(request, member)
+        if current is None:
+            continue
+        self._stopping_run_ids.add(member)
+        record = self._run_idempotency_store.status_for_run(scope, member)
+        if (record and record.get("owner_pid") != self._run_owner_pid
+                and _owner_alive(int(record.get("owner_pid") or 0), int(record.get("owner_started") or 0))):
+            # Its durable fence is committed; another live executor owns the
+            # settlement proof. Never manufacture cancellation on its behalf.
+            receipts.append({"run_id": member, "status": record["status"].get("status")})
+            continue
+        _stop_live_run(self, member, current, self._active_run_agents.get(member),
+                       self._active_run_tasks.get(member), _api_server=_api_server)
+        current = self._run_statuses[member]
+        receipts.append({"run_id": member, "status": current.get("status")})
+    settled = len(receipts) == len(lineage) and all(
+        item["status"] in TERMINAL_STATUSES for item in receipts)
+    return web.json_response({**self._run_statuses.get(run_id, status),
+                              "stop_requested": True, "lineage": receipts, "lineage_settled": settled})
+
+
+def _run_stop_requested(self, run_id):
+    return run_id in self._stopping_run_ids or self._run_idempotency_store.stop_requested(run_id)
+
+
+def _observe_durable_stop(self, run_id, *, _api_server):
+    if run_id not in self._stopping_run_ids and self._run_idempotency_store.stop_requested(run_id):
+        _stop_live_run(self, run_id, self._run_statuses[run_id], self._active_run_agents.get(run_id),
+                       self._active_run_tasks.get(run_id), _api_server=_api_server)
+
+
+def _stop_live_run(self, run_id, status, agent, task, *, _api_server):
     _openai_error = _api_server._openai_error
     if status.get("status") in TERMINAL_STATUSES:
         return web.json_response(status)
     ensure_job_recovery(self, run_id, _api_server._api_request_profile.get())
     task = self._active_run_tasks.get(run_id, task)
     if agent is None and task is None:
+        if self._run_idempotency_store.stop_requested(run_id):
+            _finish_run(self, run_id, "cancelled")
+            return web.json_response(self._run_statuses[run_id])
         return _json_error(
             _openai_error, f"Run is not active in this gateway process: {run_id}",
             code="run_not_active", status=409)

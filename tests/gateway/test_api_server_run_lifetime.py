@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
 from gateway.platforms import api_server_runs
+from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
 from tools import approval, approval_gateway_wait
 
 
@@ -23,8 +24,10 @@ def _request(body=None, *, key=None):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("when", ["before_start", "shutdown_before_start", "running", "approval_wait", "worker_cancelled"])
-async def test_cancellation_releases_run_only_after_execution_settles(when):
+async def test_cancellation_releases_run_only_after_execution_settles(when, tmp_path):
     adapter = APIServerAdapter(PlatformConfig(enabled=True))
+    adapter._run_idempotency_store.close()
+    adapter._run_idempotency_store = RunIdempotencyStore(str(tmp_path / "runs.db"))
     adapter._max_concurrent_runs = 1
     loop = asyncio.get_running_loop()
     ready = asyncio.Event()
@@ -62,6 +65,7 @@ async def test_cancellation_releases_run_only_after_execution_settles(when):
                     adapter._set_run_status(run_id, "waiting_for_approval")
                     assert adapter._run_statuses[run_id]["status"] == "stopping"
                     assert adapter.active_agent_work_count() == 1
+                    assert adapter._run_idempotency_store.stop_requested(run_id)
                 if when == "approval_wait":
                     await asyncio.wait_for(approval_released.wait(), timeout=5)
                 replay = await adapter._handle_runs(_request(key="lifetime"))
@@ -79,6 +83,7 @@ async def test_cancellation_releases_run_only_after_execution_settles(when):
             assert run_id not in adapter._active_run_agents
             assert run_id not in adapter._run_approval_sessions
             assert adapter.active_agent_work_count() == 0
+            assert adapter._run_idempotency_store.stop_requested(run_id)
             if when in {"before_start", "shutdown_before_start"}:
                 agent.run_conversation.assert_not_called()
             app = web.Application()

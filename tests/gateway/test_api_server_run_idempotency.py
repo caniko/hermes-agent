@@ -1,6 +1,7 @@
 """Durable run event, approval receipt, and frozen-dispatch recovery contracts."""
 
 import pytest
+import sqlite3
 
 from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
 
@@ -90,6 +91,31 @@ def test_stop_and_recovery_reservations_serialize_across_store_connections(tmp_p
     finally:
         owner.close()
         controller.close()
+
+
+def test_existing_store_upgrade_retains_pending_approval_and_stop_past_expiry(tmp_path):
+    path = tmp_path / "existing.db"
+    store = RunIdempotencyStore(str(path))
+    _freeze_approved_call(store)
+    before = store.events_after("scope-a", "run-a", 0)
+    store.close()
+    # The previous schema has these same admission/event/approval rows, but no
+    # lineage-stop table. Opening the upgraded worker must migrate in place.
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE run_stops")
+        conn.execute("UPDATE run_idempotency SET retention_until=1")
+    upgraded = RunIdempotencyStore(str(path))
+    try:
+        assert upgraded.approval_for_run("scope-a", "run-a", "approval-a")["receipt"]["choice"] == "once"
+        assert upgraded.events_after("scope-a", "run-a", 0) == before
+        assert upgraded.stop_lineage("scope-a", "run-a") == ["run-a"]
+        upgraded.update_status("run-a", {"run_id": "run-a", "status": "cancelled"})
+        assert upgraded.lookup("scope-a", "key-a", "fingerprint-a")[0] == "reused"
+        assert upgraded.status_for_run("scope-a", "run-a") is not None
+        assert upgraded.stop_requested("run-a")
+        assert upgraded.reserve_recovery_successor("scope-a", "run-a", successor_run_id="forbidden")["state"] == "cancelled"
+    finally:
+        upgraded.close()
 
 
 def test_run_events_replay_after_store_reopen_without_duplicates(tmp_path):
