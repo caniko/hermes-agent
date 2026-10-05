@@ -55,17 +55,17 @@ def qualify(report, provenance):
 
 def retain():
     evidence = Path(os.environ["SIMIT_NIX_BUILD_RESULTS"])
-    if (evidence / "installable").read_text().strip() != ".#checks.x86_64-linux.target-job-lifecycle":
+    if (evidence / "installable").read_text(encoding="utf-8-sig").strip() != ".#checks.x86_64-linux.target-job-lifecycle":
         raise ValueError("Unexpected lifecycle installable")
-    results = json.loads((evidence / "result.json").read_text())
+    results = json.loads((evidence / "result.json").read_text(encoding="utf-8-sig"))
     if len(results) != 1 or set(results[0]["outputs"]) != {"out"}:
         raise ValueError("Expected one lifecycle output")
     output = Path(results[0]["outputs"]["out"])
     if not re.fullmatch(r"/nix/store/[a-z0-9]{32}-[^/]+", str(output)):
         raise ValueError("Lifecycle output must be a store path")
-    receipt = json.loads((output / "receipt.json").read_text())
+    receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8-sig"))
     checked = qualify(output / "lifecycle.xml", receipt["source"])
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, encoding="utf-8").strip()
     if receipt != checked or receipt["source"]["revision"] != revision:
         raise ValueError("Lifecycle receipt does not match the checkout and report")
     for name in ["receipt.json", "lifecycle.xml"]:
@@ -77,5 +77,5 @@ if __name__ == "__main__":
         retain()
     else:
         report, source, destination = map(Path, sys.argv[1:])
-        receipt = qualify(report, json.loads(source.read_text()))
-        destination.write_text(json.dumps(receipt, indent=2) + "\n")
+        receipt = qualify(report, json.loads(source.read_text(encoding="utf-8-sig")))
+        destination.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")

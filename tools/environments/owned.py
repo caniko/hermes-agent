@@ -4,6 +4,8 @@ This deliberately isn't a LocalEnvironment: file operations and kernel staging
 must use the target execution channel even when the authority is on this host.
 """
 
+import posixpath
+
 from tools.environments.base import BaseEnvironment
 from tools.environments.job_supervision import SupervisionError
 from tools.environments.supervised_execution import SupervisedProcessHandle
@@ -23,7 +25,7 @@ class OwnedEnvironment(BaseEnvironment):
         self._prefer_nonlogin = True
 
     def get_temp_dir(self):
-        return self.binding.supervisor.runtime_dir + "/tmp"
+        return posixpath.join(self.binding.supervisor.runtime_dir, "tmp")
 
     def _run_bash(self, cmd_string, *, login=False, timeout=120, stdin_data=None,
                   wait_for_descendants=False):

@@ -6,11 +6,9 @@ The CLI/transport lives in filesystem_authority_server, outside model tool schem
 """
 
 import base64
-import fcntl
 import hashlib
 import json
 import os
-import pwd
 import re
 import subprocess
 import threading
@@ -27,11 +25,16 @@ def fingerprint(value) -> str:
 
 class FilesystemAuthority:
     def __init__(self, state: Path, principals: dict[int, dict], *, supervisor_factory=None):
+        getuid = getattr(os, "getuid", None)
+        if getuid is None:
+            raise RuntimeError("filesystem authority requires POSIX identity and locking")
+        import fcntl
+
         if len({policy["id"] for policy in principals.values()}) != len(principals):
             raise ValueError("each control identity requires a distinct principal")
         self.state = state.resolve(strict=True)
         stat = self.state.stat()
-        if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+        if stat.st_uid != getuid() or stat.st_mode & 0o077:
             raise ValueError("authority state must be private and owned by the service user")
         self._anchor = open(self.state / "authority.lock", "a", encoding="utf-8")
         try:
@@ -78,12 +81,15 @@ class FilesystemAuthority:
         self._anchor.close()
 
     def _system_supervisor(self, row, uid):
+        import pwd
+
         from tools.environments.local import _find_bash
 
         bash = _find_bash()
         def execute(script, stdin=None):
             return subprocess.run([bash, "--noprofile", "--norc", "-c", script],
-                                  input=stdin, capture_output=True, text=True, timeout=30)
+                                  input=stdin, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=30)
         # A read-only host filesystem still exposes same-UID credentials and
         # homes. Start from an authority-owned empty root, adding only platform
         # tools read-only, the requested directory binds, and this claim's runtime.
@@ -175,7 +181,7 @@ class FilesystemAuthority:
         try:
             with self.store.transaction():
                 self.store.db.execute("INSERT INTO execution VALUES (?,?,?,?)",
-                                      (row["id"], policy["execution_uid"], Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8"),
+                                      (row["id"], policy["execution_uid"], Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8-sig"),
                                        json.dumps(policy.get("environment", {}))))
             self.store.validate_roots(row["id"])
             fds = self._root_fds.setdefault(row["id"], [])
