@@ -194,6 +194,11 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
+      - name: Fetch official release baselines
+        if: github.repository != 'NousResearch/hermes-agent'
+        shell: bash
+        run: git fetch --no-tags https://github.com/NousResearch/hermes-agent.git 'refs/tags/v*:refs/tags/v*'
+
       # Old installers refresh PATH after winget installs ripgrep, dropping the
       # process-only uv path. Supply the tool before running those shipped scripts.
       - name: Set up driver tools only
