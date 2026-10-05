@@ -81,7 +81,8 @@ def test_stage_kernel_in_one_admission_with_private_exact_payloads(tmp_path):
     assert not (tmp_path / "spaces").exists()
 
 
-def test_stage_kernel_refuses_incomplete_stdin(tmp_path):
+@pytest.mark.parametrize("failure", ["incomplete_stdin", "directory_setup"])
+def test_stage_kernel_refuses_incomplete_setup(tmp_path, failure):
     from tools.code_kernel_supervised import _stage_kernel_files
 
     class TruncatedShell(Shell):
@@ -89,17 +90,13 @@ def test_stage_kernel_refuses_incomplete_stdin(tmp_path):
             kwargs["stdin_data"] = kwargs["stdin_data"].splitlines()[0] + "\n"
             return super().execute(command, **kwargs)
 
-    env = TruncatedShell()
+    directory = tmp_path / "kernel"
+    env = TruncatedShell() if failure == "incomplete_stdin" else Shell()
+    if failure == "directory_setup":
+        directory.write_text("existing file")
     with pytest.raises(RuntimeError, match="supervised kernel staging failed"):
-        _stage_kernel_files(env, str(tmp_path / "kernel"), "runner", "tools", "secret")
-    assert not (tmp_path / "kernel/kernel.env").exists()
-
-
-def test_stage_kernel_refuses_directory_setup_failure(tmp_path):
-    from tools.code_kernel_supervised import _stage_kernel_files
-
-    directory = tmp_path / "not-a-directory"
-    directory.write_text("existing file")
-    with pytest.raises(RuntimeError, match="supervised kernel staging failed"):
-        _stage_kernel_files(Shell(), str(directory), "runner", "tools", "secret")
-    assert directory.read_text() == "existing file"
+        _stage_kernel_files(env, str(directory), "runner", "tools", "secret")
+    if failure == "directory_setup":
+        assert directory.read_text() == "existing file"
+    else:
+        assert not (directory / "kernel.env").exists()

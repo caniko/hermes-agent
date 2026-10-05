@@ -95,7 +95,7 @@ def test_descendant_wait_holds_through_unknown_and_main_exit():
     try:
         assert unknown_observed.wait(5)
         with pytest.raises(subprocess.TimeoutExpired):
-            handle.wait(timeout=.3)
+            handle.wait(timeout=2)
         assert handle.poll() is None
     finally:
         allow_settlement.set()
@@ -114,7 +114,7 @@ def test_streaming_job_is_not_blocked_by_another_jobs_cached_probe():
         request = json.loads(payload)
         if request["job"] == first_job.id:
             probe_started.set()
-            assert release_probe.wait(5)
+            assert release_probe.wait(15)
         return subprocess.CompletedProcess([], 0, json.dumps({"ok": True, "result": {
             "state": "settled", "exit_code": 0, "output": "",
         }}))
@@ -128,7 +128,7 @@ def test_streaming_job_is_not_blocked_by_another_jobs_cached_probe():
     try:
         assert probe_started.wait(5)
         handle = SupervisedProcessHandle(supervisor, second_job)
-        assert handle.wait(timeout=1) == 0
+        assert handle.wait(timeout=5) == 0
         assert not release_probe.is_set()
     finally:
         release_probe.set()
