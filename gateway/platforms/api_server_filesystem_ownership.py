@@ -56,7 +56,8 @@ def ownership_supervisor(context):
                                    ssh_config=_ssh_config_from_config(config))
         def call(payload):
             return subprocess.run(transport._build_ssh_command() + [shlex.join(command)], input=payload,
-                                  env=client_env_with({}), capture_output=True, text=True, timeout=45)
+                                  env=client_env_with({}), capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=45)
     return FilesystemSupervisor(call, descriptor, {}), transport
 
 
