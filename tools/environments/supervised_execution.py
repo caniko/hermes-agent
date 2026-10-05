@@ -116,7 +116,7 @@ for their cgroup. Transport loss keeps the handle live and the receipt intact.
         self.returncode = None
         self._done = threading.Event()
         read_fd, self._write_fd = os.pipe()
-        self.stdout = os.fdopen(read_fd, "r", encoding="utf-8", errors="replace")
+        self.stdout = os.fdopen(read_fd, "r", encoding="utf-8-sig", errors="replace")
         if binding := current_job_supervision():
             binding.handles.append(self)
         spawn_context_thread(target=self._drain, daemon=True,

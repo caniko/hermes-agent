@@ -90,13 +90,14 @@ class AuthorityHandler(socketserver.StreamRequestHandler):
 
 
 def serve(config_path):
-    if os.geteuid() != 0:
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None or geteuid() != 0:
         raise PermissionError("the cross-user authority must run as a system service")
     path = Path(config_path)
     metadata = path.stat()
     if metadata.st_uid != 0 or metadata.st_mode & 0o022:
         raise PermissionError("authority enrollment must be root-owned and not writable by other users")
-    config = json.loads(path.read_text())
+    config = json.loads(path.read_text(encoding="utf-8-sig"))
     principals = {int(key): value for key, value in config["principals"].items()}
     for uid, policy in principals.items():
         if uid <= 0 or type(policy["execution_uid"]) is not int or policy["execution_uid"] <= 0:

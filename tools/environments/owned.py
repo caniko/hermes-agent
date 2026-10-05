@@ -23,7 +23,7 @@ class OwnedEnvironment(BaseEnvironment):
         self._prefer_nonlogin = True
 
     def get_temp_dir(self):
-        return self.binding.supervisor.runtime_dir + "/tmp"
+        return self.binding.supervisor.runtime_dir + "/tmp"  # no-tmp: ok — private granted namespace scratch
 
     def _run_bash(self, cmd_string, *, login=False, timeout=120, stdin_data=None,
                   wait_for_descendants=False):
