@@ -58,7 +58,7 @@ class SSHEnvironment(BaseEnvironment):
 
     def __init__(self, host: str, user: str, cwd: str = "~",
                  timeout: int = 60, port: int = 22, key_path: str = "",
-                 probe_only: bool = False, hermes_home: str = ""):
+                 probe_only: bool = False, hermes_home: str = "", sync_files: bool = True):
         if hermes_home and (not posixpath.isabs(hermes_home) or "\0" in hermes_home
                             or posixpath.normpath(hermes_home).strip("/") == ""):
             raise ValueError("terminal.ssh_hermes_home must be an absolute remote directory other than /")
@@ -87,12 +87,14 @@ class SSHEnvironment(BaseEnvironment):
         self._remote_home_detected = False
         self._remote_home = self._detect_remote_home()
         self._remote_hermes_home = self._configured_hermes_home or f"{self._remote_home}/.hermes"
-        self._ensure_remote_dirs()
-        self._sync_manager = FileSyncManager(
-            get_files_fn=lambda: iter_sync_files(self._remote_hermes_home),
-            upload_fn=self._scp_upload, delete_fn=self._ssh_delete,
-            bulk_upload_fn=self._ssh_bulk_upload, bulk_download_fn=self._ssh_bulk_download)
-        self._sync_manager.sync(force=True)
+        self._sync_manager = None
+        if sync_files:
+            self._ensure_remote_dirs()
+            self._sync_manager = FileSyncManager(
+                get_files_fn=lambda: iter_sync_files(self._remote_hermes_home),
+                upload_fn=self._scp_upload, delete_fn=self._ssh_delete,
+                bulk_upload_fn=self._ssh_bulk_upload, bulk_download_fn=self._ssh_bulk_download)
+            self._sync_manager.sync(force=True)
         self.init_session()
 
     def _control_socket_for(self, send_env: tuple[str, ...]) -> Path:
