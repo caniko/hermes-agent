@@ -236,6 +236,16 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Resolve the upstream release used by upgrade tests
+        env:
+          RELEASE_TAG_SOURCE: https://github.com/NousResearch/hermes-agent.git
+        run: |
+          set -euo pipefail
+          if ! git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1; then
+            git fetch --no-tags "$RELEASE_TAG_SOURCE" 'refs/tags/v20*:refs/tags/v20*'
+          fi
+          git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1
+
       - name: Set up Node
         # `hermes update` builds the web UI / TUI workspaces.
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

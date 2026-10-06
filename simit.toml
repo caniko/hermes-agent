@@ -19,6 +19,8 @@ nix_builds = [".#minimal", ".#checks.x86_64-linux.target-job-lifecycle"]
 
 [ci.workflow_variables]
 generator_revision = "c8e1cc3cf40a72a9f2e99658057ac63c180498a5"
+release_tag_source = "https://github.com/NousResearch/hermes-agent.git"
+js_check_args = '''${{ github.event.repository.fork && '--concurrency 1' || '' }}'''
 linux_suite_runner = '''${{ vars.HERMES_LINUX_RUNNER || (github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-96-core') }}'''
 linux_runner = '''${{ vars.HERMES_LINUX_RUNNER || (github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-32-core') }}'''
 windows_runner = '''${{ vars.HERMES_WINDOWS_RUNNER || (github.event.repository.fork && 'windows-latest' || 'windows-latest-32-core') }}'''
