@@ -16,6 +16,18 @@ def main():
     parser.add_argument("--timeout-seconds", type=int, default=300)
     args = parser.parse_args()
     root = args.root.resolve()
+    reference = "git+" + root.as_uri() + "?shallow=1"
+    # Metadata may name a lazy Git source that has not reached the store yet.
+    # Archive the locked inputs, leaving the UUID-renamed payload below cold.
+    archive = subprocess.run(
+        ["nix", "flake", "archive", "--json", "--no-update-lock-file", reference],
+        cwd=root,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        timeout=args.timeout_seconds,
+    )
     metadata = subprocess.run(
         [
             "nix",
@@ -23,15 +35,18 @@ def main():
             "metadata",
             "--json",
             "--no-update-lock-file",
-            "git+" + root.as_uri() + "?shallow=1",
+            reference,
         ],
         cwd=root,
         check=True,
         stdout=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         timeout=args.timeout_seconds,
     )
     captured = json.loads(metadata.stdout)
+    if json.loads(archive.stdout)["path"] != captured["path"]:
+        raise RuntimeError("The archived source changed during metadata capture")
     fields = {
         name: captured["locked"][name]
         for name in ["narHash", "rev", "revCount", "lastModified"]
@@ -63,7 +78,7 @@ def main():
         prefix="hermes-cold-source-", dir=args.temp_root
     ) as directory:
         fixture = Path(directory)
-        (fixture / "flake.nix").write_text(expression)
+        (fixture / "flake.nix").write_text(expression, encoding="utf-8")
         subprocess.run(
             [
                 "nix",
