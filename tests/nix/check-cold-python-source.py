@@ -27,7 +27,7 @@ def main():
         ],
         cwd=root,
         check=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
         text=True,
         timeout=args.timeout_seconds,
     )
