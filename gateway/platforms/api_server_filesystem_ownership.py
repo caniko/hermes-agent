@@ -49,7 +49,8 @@ def ownership_supervisor(context):
     if context.requested["backend"] == "local":
         env = _make_run_env({})
         def call(payload):
-            return subprocess.run(command, input=payload, env=env, capture_output=True, text=True, timeout=45)
+            return subprocess.run(command, input=payload, env=env, capture_output=True,
+                                  text=True, encoding="utf-8", timeout=45)
     else:
         transport = _build_ssh_env(cwd=context.requested["cwd"], timeout=10, probe_only=True,
                                    ssh_config=_ssh_config_from_config(config))

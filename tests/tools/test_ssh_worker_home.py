@@ -3,6 +3,7 @@
 import os
 import shlex
 import shutil
+import stat
 from contextlib import nullcontext
 
 import pytest
@@ -53,8 +54,9 @@ def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
         profile.mkdir()
         skill = profile / "skills" / "example" / "SKILL.md"
         skill.parent.mkdir(parents=True)
-        skill.write_text(f"skill-{name}")
+        skill.write_text(f"skill-{name}: café", encoding="utf-8")
         remote = tmp_path / f"worker '{name}'"
+        remote.mkdir(mode=0o750)
         (profile / "config.yaml").write_text(
             f"terminal:\n  backend: ssh\n  ssh_host: {target['host']}\n  ssh_user: {target['user']}\n"
             f"  ssh_port: {target['port']}\n  ssh_key: {target['key']}\n"
@@ -73,7 +75,9 @@ def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
                 env = _build_ssh_env(cwd=cfg["cwd"], timeout=10,
                                      ssh_config=_ssh_config_from_config(cfg))
                 try:
-                    assert (remote / "skills/example/SKILL.md").read_text() == skill.read_text()
+                    assert (remote / "skills/example/SKILL.md").read_text(encoding="utf-8") == skill.read_text(encoding="utf-8")
+                    assert stat.S_IMODE(remote.stat().st_mode) == 0o750
+                    assert stat.S_IMODE((remote / "skills/example").stat().st_mode) == 0o700
                     proc = env._run_bash(
                         'printf "%s\\n" "$HERMES_HOME"; '
                         f'printf updated-{name} > "$HERMES_HOME/skills/example/SKILL.md"; '
