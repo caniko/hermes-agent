@@ -1,4 +1,9 @@
-{pkgs, package, source, revision}: let
+{
+  pkgs,
+  package,
+  source,
+  revision,
+}: let
   testPackage = package.override {extraDependencyGroups = ["dev"];};
   python = "${testPackage.hermesVenv}/bin/python3";
 in
@@ -10,7 +15,15 @@ in
         cores = 2;
         diskSize = 16384;
       };
-      environment.systemPackages = with pkgs; [bash coreutils findutils git openssh systemd util-linux];
+      environment.systemPackages = with pkgs; [
+        bash
+        coreutils
+        findutils
+        git
+        openssh
+        systemd
+        util-linux
+      ];
       # The disposable transport starts its own loopback sshd. The NixOS module
       # supplies OpenSSH's privilege-separation accounts and runtime directory.
       services.openssh.enable = true;
@@ -49,6 +62,7 @@ in
           "tests/tools/test_filesystem_claims.py "
           "tests/tools/test_filesystem_observation.py "
           "tests/tools/test_filesystem_authority.py "
+          "tests/tools/test_filesystem_authority_transport.py "
           "tests/tools/test_filesystem_authority_system.py "
           "tests/gateway/test_api_server_execution_context.py "
           "tests/gateway/test_gateway_command_line_matcher.py "

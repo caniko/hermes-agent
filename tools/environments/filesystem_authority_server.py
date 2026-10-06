@@ -19,9 +19,6 @@ import sys
 import threading
 from pathlib import Path
 
-from tools.environments.filesystem_authority import FilesystemAuthority
-from tools.environments.filesystem_claims import ClaimStore
-
 MAX_MESSAGE = 8 * 1024 * 1024
 
 
@@ -90,6 +87,8 @@ class AuthorityHandler(socketserver.StreamRequestHandler):
 
 
 def serve(config_path):
+    from tools.environments.filesystem_authority import FilesystemAuthority
+
     if os.geteuid() != 0:  # windows-footgun: ok — Linux root-owned enrollment service.
         raise PermissionError("the cross-user authority must run as a system service")
     path = Path(config_path)
@@ -136,6 +135,8 @@ def main():
     commands.add_parser("request").add_argument("--socket", required=True)
     args = parser.parse_args()
     if args.command == "init":
+        from tools.environments.filesystem_claims import ClaimStore
+
         ClaimStore.initialize(args.state)
         store = ClaimStore(args.state)
         try:

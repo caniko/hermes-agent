@@ -26,6 +26,7 @@ REQUIRED = {
     "test_stop_admission_fences_delayed_requests_after_restart[before_create]",
     "test_stop_admission_fences_delayed_requests_after_restart[during_admission]",
     "test_system_provider_preserves_uid_and_confines_same_uid_workers",
+    "test_request_client_needs_only_stdlib_and_authenticates_the_peer",
 }
 
 DIAGNOSTIC_MARKER = "HERMES_LIFECYCLE_DIAGNOSTIC_V1 "
