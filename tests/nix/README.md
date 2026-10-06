@@ -38,3 +38,11 @@ The complete test selections and native architecture coverage are retained.
 Canix's installable qualification is declared in `simit.toml` and rendered by
 the pinned Simit into `nix-builds.yaml`. Its minimal production build, complete
 lifecycle proof, result retention, and resource budget are generator-owned.
+
+The specialized upstream workflows are also rendered by Simit. Their source
+templates live in `.simit/workflows/`; `[ci.workflow_variables]` holds fork
+runner/worker/timeout policy, and `[ci.workflow_templates]` declares each output.
+Edit these sources and regenerate with the pinned generator, then use
+`init ci --check --diff`. Generated workflow files must not be edited directly.
+The retained generation artifact contains the source templates, policy, rendered
+workflows, and their hashes.

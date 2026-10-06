@@ -65,7 +65,7 @@ jobs:
         run: python3 scripts/test-qualify-job-lifecycle.py
 
       - name: Project setup 3
-        run: nix run github:caniko/simit/bbfef6f6674d9977d7504a0e9c66be39147d9400 -- init ci --platform github --ci-provider actions --runtime nix --check --diff
+        run: nix run github:caniko/simit/c8e1cc3cf40a72a9f2e99658057ac63c180498a5 -- init ci --platform github --ci-provider actions --runtime nix --check --diff
 
       - name: Build ${{ matrix.installable }}
         env:

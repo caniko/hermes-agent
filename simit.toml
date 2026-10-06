@@ -5,6 +5,39 @@ runtime = "nix"
 runner = "ubuntu-24.04"
 nix_builds = [".#minimal", ".#checks.x86_64-linux.target-job-lifecycle"]
 
+[ci.workflow_templates]
+".github/workflows/contributor-check.yml" = ".simit/workflows/contributor-check.yml.in"
+".github/workflows/e2e-desktop-core.yml" = ".simit/workflows/e2e-desktop-core.yml.in"
+".github/workflows/e2e-desktop-update.yml" = ".simit/workflows/e2e-desktop-update.yml.in"
+".github/workflows/generate-native-ci.yaml" = ".simit/workflows/generate-native-ci.yaml.in"
+".github/workflows/js-tests.yml" = ".simit/workflows/js-tests.yml.in"
+".github/workflows/nix.yml" = ".simit/workflows/nix.yml.in"
+".github/workflows/rust-tests.yml" = ".simit/workflows/rust-tests.yml.in"
+".github/workflows/tests-os.yml" = ".simit/workflows/tests-os.yml.in"
+".github/workflows/tests.yml" = ".simit/workflows/tests.yml.in"
+".github/workflows/windows-install-update-e2e.yml" = ".simit/workflows/windows-install-update-e2e.yml.in"
+
+[ci.workflow_variables]
+generator_revision = "c8e1cc3cf40a72a9f2e99658057ac63c180498a5"
+linux_suite_runner = '''${{ vars.HERMES_LINUX_RUNNER || (github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-96-core') }}'''
+linux_runner = '''${{ vars.HERMES_LINUX_RUNNER || (github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-32-core') }}'''
+windows_runner = '''${{ vars.HERMES_WINDOWS_RUNNER || (github.event.repository.fork && 'windows-latest' || 'windows-latest-32-core') }}'''
+windows_arm_runner = '''${{ vars.HERMES_WINDOWS_ARM_RUNNER || (github.event.repository.fork && 'windows-11-arm' || 'windows-latest-32-arm-core') }}'''
+suite_timeout = '''${{ github.event.repository.fork && 180 || 30 }}'''
+linux_timeout = '''${{ github.event.repository.fork && 120 || 30 }}'''
+upgrade_timeout = '''${{ github.event.repository.fork && 120 || 60 }}'''
+nix_timeout = '''${{ github.event.repository.fork && 180 || 60 }}'''
+os_timeout = '''${{ matrix.timeout || (github.event.repository.fork && 120 || 30) }}'''
+windows_arm_timeout = '''${{ github.event.repository.fork && 180 || 60 }}'''
+windows_e2e_timeout = '''${{ github.event.repository.fork && 120 || 25 }}'''
+windows_install_timeout = '''${{ github.event.repository.fork && 120 || 50 }}'''
+suite_workers = '''${{ vars.HERMES_TEST_WORKERS || (github.event.repository.fork && '2' || '96') }}'''
+e2e_workers = '''${{ github.event.repository.fork && '1' || '3' }}'''
+upgrade_workers = '''${{ github.event.repository.fork && '1' || '6' }}'''
+os_workers = '''${{ matrix.marker == 'windows' && (github.event.repository.fork && '1' || (runner.arch == 'ARM64' && '2' || '8')) || (github.event.repository.fork && '2' || '') }}'''
+nix_jobs = '''${{ vars.HERMES_NIX_BUILD_JOBS || (github.event.repository.fork && '1' || '') }}'''
+nix_cores = '''${{ vars.HERMES_NIX_BUILD_CORES || (github.event.repository.fork && '2' || '') }}'''
+
 [ci.nix_build]
 only = true
 timeout_minutes = 120
@@ -18,7 +51,7 @@ extra_env = { NIX_CONFIG = "log-lines = 3000" }
 extra_setup = [
   "python3 tests/nix/check-cold-python-source.py",
   "python3 scripts/test-qualify-job-lifecycle.py",
-  "nix run github:caniko/simit/bbfef6f6674d9977d7504a0e9c66be39147d9400 -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
+  "nix run github:caniko/simit/c8e1cc3cf40a72a9f2e99658057ac63c180498a5 -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
 ]
 post_build = ["if [ \"$(cat \"$SIMIT_NIX_BUILD_RESULTS/installable\")\" = '.#checks.x86_64-linux.target-job-lifecycle' ]; then python3 scripts/qualify-job-lifecycle.py retain; fi"]
 post_build_always = ["python3 scripts/qualify-job-lifecycle.py retain-diagnostics"]
