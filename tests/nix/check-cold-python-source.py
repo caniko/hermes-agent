@@ -23,7 +23,7 @@ def main():
             "metadata",
             "--json",
             "--no-update-lock-file",
-            "git+" + root.as_uri(),
+            "git+" + root.as_uri() + "?shallow=1",
         ],
         cwd=root,
         check=True,
