@@ -26,8 +26,8 @@ concurrency:
 jobs:
   update:
     name: Desktop install/update E2E (Linux, ${{ matrix.cell }})
-    runs-on: ${{ vars.HERMES_LINUX_RUNNER || 'ubuntu-24.04' }}
-    timeout-minutes: 120
+    runs-on: ${{ vars.HERMES_LINUX_RUNNER || (github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-32-core') }}
+    timeout-minutes: ${{ github.event.repository.fork && 120 || 30 }}
     # Advisory until stable on CI (see ci.yaml): a red shard does not fail the caller.
     continue-on-error: true
     strategy:

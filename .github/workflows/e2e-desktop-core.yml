@@ -24,8 +24,8 @@ concurrency:
 jobs:
   core:
     name: Desktop core E2E (Linux)
-    runs-on: ${{ vars.HERMES_LINUX_RUNNER || 'ubuntu-24.04' }}
-    timeout-minutes: 120
+    runs-on: ${{ vars.HERMES_LINUX_RUNNER || (github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-32-core') }}
+    timeout-minutes: ${{ github.event.repository.fork && 120 || 30 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 

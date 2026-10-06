@@ -70,9 +70,9 @@ jobs:
     # Release runs force the lane: a stable candidate must build the flake
     # no matter what its diff touches.
     if: needs.detect.outputs.nix == 'true' || inputs.release == true
-    # Serialize cold closure builds on a standard hosted fork runner.
-    runs-on: ${{ vars.HERMES_LINUX_RUNNER || 'ubuntu-24.04' }}
-    timeout-minutes: 180
+    # Forks lack upstream's larger runners; bound their cold closure builds.
+    runs-on: ${{ vars.HERMES_LINUX_RUNNER || (github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-32-core') }}
+    timeout-minutes: ${{ github.event.repository.fork && 180 || 60 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -147,7 +147,14 @@ jobs:
       - name: nix flake check
         # --print-build-logs: a check that fails then prints the assertion
         # that failed, and not only the derivation that failed to build.
-        run: nix flake check "${{ inputs.release == true && format('path:{0}/release-source', runner.temp) || '.' }}" --print-build-logs --max-jobs 1 --cores 2
+        env:
+          NIX_BUILD_JOBS: ${{ vars.HERMES_NIX_BUILD_JOBS || (github.event.repository.fork && '1' || '') }}
+          NIX_BUILD_CORES: ${{ vars.HERMES_NIX_BUILD_CORES || (github.event.repository.fork && '2' || '') }}
+        run: |
+          flags=()
+          if [ -n "$NIX_BUILD_JOBS" ]; then flags+=(--max-jobs "$NIX_BUILD_JOBS"); fi
+          if [ -n "$NIX_BUILD_CORES" ]; then flags+=(--cores "$NIX_BUILD_CORES"); fi
+          nix flake check "${{ inputs.release == true && format('path:{0}/release-source', runner.temp) || '.' }}" --print-build-logs "${flags[@]}"
 
       - name: Verify release package runtime identity
         if: inputs.release == true

@@ -25,10 +25,16 @@ the metadata workspace and resolves its payload from the live checkout.
 
 ## Hosted fork runners
 
-General CI defaults to standard hosted Linux, Windows x64, Windows ARM64, and
-macOS runners. Owners with provisioned larger runners can set repository
+General CI preserves upstream's provisioned runners, worker counts, and time
+budgets. Forks default to standard hosted Linux, Windows x64, Windows ARM64, and
+macOS runners with bounded concurrency. Owners can set repository
 variables `HERMES_LINUX_RUNNER`, `HERMES_WINDOWS_RUNNER`, and
 `HERMES_WINDOWS_ARM_RUNNER`; `HERMES_TEST_WORKERS` controls full-suite file
-parallelism (default two). E2E files run serially to leave CPU for their child
-processes. Nix builds use one job and two cores. The complete test selections
-and native architecture coverage are retained.
+parallelism (default two in forks). Fork E2E files run serially to leave CPU for
+their child processes. Fork Nix builds use one job and two cores; owners can
+override these with `HERMES_NIX_BUILD_JOBS` and `HERMES_NIX_BUILD_CORES`.
+The complete test selections and native architecture coverage are retained.
+
+Canix's installable qualification is declared in `simit.toml` and rendered by
+the pinned Simit into `nix-builds.yaml`. Its minimal production build, complete
+lifecycle proof, result retention, and resource budget are generator-owned.
