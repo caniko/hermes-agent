@@ -2,23 +2,39 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 from urllib.parse import quote, urlencode
 import uuid
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path.cwd())
-    parser.add_argument("--temp-root", type=Path)
-    parser.add_argument("--timeout-seconds", type=int, default=300)
-    args = parser.parse_args()
-    root = args.root.resolve()
-    reference = "git+" + root.as_uri() + "?shallow=1"
-    # Metadata may name a lazy Git source that has not reached the store yet.
-    # Archive the locked inputs, leaving the UUID-renamed payload below cold.
+def snapshot_git_source(root, destination, timeout):
+    """Capture tracked working contents without ignored build/venv artifacts."""
+    entries = subprocess.check_output(
+        ["git", "ls-files", "--stage", "-z"], cwd=root, timeout=timeout
+    )
+    for entry in entries.split(b"\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split(b"\t", 1)
+        if metadata.split()[0] == b"160000":
+            raise RuntimeError("Cold-source fixture does not support Git submodules")
+        relative = Path(os.fsdecode(name))
+        source = root / relative
+        target = destination / relative
+        if not source.exists() and not source.is_symlink():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target, follow_symlinks=False)
+
+
+def check_cold_source(root, snapshot, fixture, timeout):
+    # Nix 2.35 can hash a shallow worktree and its fetched Git tree differently.
+    # Archive one tracked snapshot, leaving the UUID-renamed payload below cold.
+    reference = "path:" + str(snapshot)
     archive = subprocess.run(
         ["nix", "flake", "archive", "--json", "--no-update-lock-file", reference],
         cwd=root,
@@ -26,7 +42,7 @@ def main():
         stdout=subprocess.PIPE,
         text=True,
         encoding="utf-8",
-        timeout=args.timeout_seconds,
+        timeout=timeout,
     )
     metadata = subprocess.run(
         [
@@ -42,7 +58,7 @@ def main():
         stdout=subprocess.PIPE,
         text=True,
         encoding="utf-8",
-        timeout=args.timeout_seconds,
+        timeout=timeout,
     )
     captured = json.loads(metadata.stdout)
     if json.loads(archive.stdout)["path"] != captured["path"]:
@@ -74,26 +90,39 @@ def main():
   in {{ checks.x86_64-linux.cold-python-source = python.venv; }};
 }}
 """
+    fixture.mkdir()
+    (fixture / "flake.nix").write_text(expression, encoding="utf-8")
+    subprocess.run(
+        [
+            "nix",
+            "flake",
+            "check",
+            "path:" + str(fixture),
+            "--no-build",
+            "--no-update-lock-file",
+            "--no-allow-import-from-derivation",
+            "--show-trace",
+        ],
+        cwd=root,
+        check=True,
+        timeout=timeout,
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--temp-root", type=Path)
+    parser.add_argument("--timeout-seconds", type=int, default=300)
+    args = parser.parse_args()
+    root = args.root.resolve()
     with tempfile.TemporaryDirectory(
         prefix="hermes-cold-source-", dir=args.temp_root
     ) as directory:
-        fixture = Path(directory)
-        (fixture / "flake.nix").write_text(expression, encoding="utf-8")
-        subprocess.run(
-            [
-                "nix",
-                "flake",
-                "check",
-                "path:" + str(fixture),
-                "--no-build",
-                "--no-update-lock-file",
-                "--no-allow-import-from-derivation",
-                "--show-trace",
-            ],
-            cwd=root,
-            check=True,
-            timeout=args.timeout_seconds,
-        )
+        temporary = Path(directory)
+        snapshot = temporary / "source"
+        snapshot_git_source(root, snapshot, args.timeout_seconds)
+        check_cold_source(root, snapshot, temporary / "fixture", args.timeout_seconds)
     print("PASS: the Python environment evaluates with a cold filtered build source")
 
 
