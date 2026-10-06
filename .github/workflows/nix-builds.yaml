@@ -22,6 +22,7 @@ jobs:
       max-parallel: 1
       matrix:
         installable:
+          - ".#minimal"
           - ".#checks.x86_64-linux.target-job-lifecycle"
     env:
       NIX_CONFIG: "log-lines = 3000"
@@ -58,9 +59,12 @@ jobs:
           sudo chmod a+rw /dev/kvm
           test -r /dev/kvm && test -w /dev/kvm
       - name: Project setup 1
-        run: python3 scripts/test-qualify-job-lifecycle.py
+        run: python3 tests/nix/check-cold-python-source.py
 
       - name: Project setup 2
+        run: python3 scripts/test-qualify-job-lifecycle.py
+
+      - name: Project setup 3
         run: nix run github:caniko/simit/bbfef6f6674d9977d7504a0e9c66be39147d9400 -- init ci --platform github --ci-provider actions --runtime nix --check --diff
 
       - name: Build ${{ matrix.installable }}
@@ -77,7 +81,7 @@ jobs:
           exit "$status"
       - name: Retain Nix results 1
         run: |
-          python3 scripts/qualify-job-lifecycle.py retain
+          if [ "$(cat "$SIMIT_NIX_BUILD_RESULTS/installable")" = '.#checks.x86_64-linux.target-job-lifecycle' ]; then python3 scripts/qualify-job-lifecycle.py retain; fi
       - name: Retain Nix diagnostics 1
         if: always()
         run: |

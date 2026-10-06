@@ -3,7 +3,7 @@ platform = "github"
 provider = "actions"
 runtime = "nix"
 runner = "ubuntu-24.04"
-nix_builds = [".#checks.x86_64-linux.target-job-lifecycle"]
+nix_builds = [".#minimal", ".#checks.x86_64-linux.target-job-lifecycle"]
 
 [ci.nix_build]
 only = true
@@ -16,10 +16,11 @@ capture_results = true
 artifact_retention_days = 31
 extra_env = { NIX_CONFIG = "log-lines = 3000" }
 extra_setup = [
+  "python3 tests/nix/check-cold-python-source.py",
   "python3 scripts/test-qualify-job-lifecycle.py",
   "nix run github:caniko/simit/bbfef6f6674d9977d7504a0e9c66be39147d9400 -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
 ]
-post_build = ["python3 scripts/qualify-job-lifecycle.py retain"]
+post_build = ["if [ \"$(cat \"$SIMIT_NIX_BUILD_RESULTS/installable\")\" = '.#checks.x86_64-linux.target-job-lifecycle' ]; then python3 scripts/qualify-job-lifecycle.py retain; fi"]
 post_build_always = ["python3 scripts/qualify-job-lifecycle.py retain-diagnostics"]
 
 [release.artifacts]
