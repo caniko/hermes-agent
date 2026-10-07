@@ -75,10 +75,10 @@ def main():
         receipt = {"schema": "hosted-runner-readiness.v1", "qualified": False,
                    "ready": False, "error": str(error), "requested_label": args.label,
                    "minimum_memory_gb": args.memory_gb}
-        args.destination.write_text(json.dumps(receipt, indent=2) + "\n")
+        args.destination.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
         raise
-    args.destination.write_text(json.dumps(receipt, indent=2) + "\n")
-    with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+    args.destination.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"label={args.label}\n")
 
 

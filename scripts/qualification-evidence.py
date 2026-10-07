@@ -33,7 +33,7 @@ def api(path):
 
 
 def identity():
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8-sig"))
     require(os.environ["GITHUB_EVENT_NAME"] == "pull_request", "Qualification requires a PR event")
     pr = event["pull_request"]
     head = pr["head"]["sha"]
@@ -49,7 +49,7 @@ def initialize(directory):
     require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "Only GitHub-hosted runners qualify")
     require(int(os.environ["GITHUB_RETENTION_DAYS"]) >= 31, "Repository/organization retention must allow 31 days")
     source = identity()
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=30).strip()
     require(revision == source["head"], "Checkout is not the exact PR head")
     source.update({"tested_source": revision, "platform": platform.platform(), "machine": platform.machine(),
                    "receipt_tool_sha256": sha256(__file__),
@@ -57,11 +57,11 @@ def initialize(directory):
                              (Path("pnpm-lock.yaml"), Path("flake.lock"), Path("Cargo.lock"),
                               Path("uv.lock"), Path("packages/paperclip-runner/runner/Cargo.lock")) if path.is_file()}})
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "source.json").write_text(json.dumps(source, indent=2) + "\n")
+    (directory / "source.json").write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8")
 
 
 def seal(directory, outcome, strict_reports):
-    source = json.loads((directory / "source.json").read_text())
+    source = json.loads((directory / "source.json").read_text(encoding="utf-8-sig"))
     reports = []
     rejected = []
     for path in sorted(directory.rglob("*.xml")):
@@ -88,7 +88,7 @@ def seal(directory, outcome, strict_reports):
                 "qualified": False, "reports": reports, "rejected": rejected,
                "members": {str(path.relative_to(directory)): sha256(path)
                            for path in sorted(directory.rglob("*")) if path.is_file() and path.name != "receipt.json"}}
-    (directory / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    (directory / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     require(not rejected, "; ".join(rejected))
 
 
@@ -103,11 +103,11 @@ def expected_red(directory):
     require(all(any(oracle in name for name in failed) for oracle in oracles),
             f"Missing baseline regression failures: {failed}")
     source_path = directory / "source.json"
-    source = json.loads(source_path.read_text())
+    source = json.loads(source_path.read_text(encoding="utf-8-sig"))
     source.update({"baseline": "f6451f242d5cbb803e3c265e90f05b642e573203",
                    "regression_fixture_sha256": sha256("packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts"),
                    "expected_assertion_failures": failed})
-    source_path.write_text(json.dumps(source, indent=2) + "\n")
+    source_path.write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8")
     seal(directory, "expected-red", True)
 
 
@@ -136,7 +136,7 @@ def artifacts(prefix, count, destination):
         page += 1
     require(len(retained) == count, f"Expected {count} required artifacts, found {len(retained)}")
     receipt = {"schema": "hosted-retention.v1", **source, "qualified": False, "artifacts": retained}
-    Path(destination).write_text(json.dumps(receipt, indent=2) + "\n")
+    Path(destination).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
 
 
 def main():
