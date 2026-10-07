@@ -1,6 +1,8 @@
 """Cancellation owns an idempotency key before a delayed create can start work."""
 
 import asyncio
+import hashlib
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -56,6 +58,14 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
                 assert stopped.status == 200
                 receipt = await stopped.json()
                 assert receipt["status"] == "cancelled"
+                assert receipt.get("admission") == {
+                    "version": 1, "root_run_id": receipt["run_id"],
+                    "key_sha256": hashlib.sha256(headers["Idempotency-Key"].encode()).hexdigest(),
+                    "body_sha256": hashlib.sha256(json.dumps(body).encode()).hexdigest(),
+                }
+                assert receipt["stop_requested"] is True
+                assert receipt["lineage_settled"] is True
+                assert receipt["lineage"] == [{"run_id": receipt["run_id"], "status": "cancelled"}]
                 release.set()
                 if pending:
                     assert (await (await pending).json())["run_id"] == receipt["run_id"]
@@ -83,6 +93,21 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
             assert replay.status == 202
             assert (await replay.json())["run_id"] == receipt["run_id"]
             stopped = await client.post("/v1/runs/stop", json=body, headers=headers)
-            assert (await stopped.json())["status"] == "cancelled"
+            resumed = await stopped.json()
+            assert resumed["status"] == "cancelled"
+            assert resumed["admission"] == receipt["admission"]
+            wire = json.dumps(body, indent=2, ensure_ascii=False)
+            stopped = await client.post("/v1/runs/stop", data=wire,
+                                        headers={**headers, "Content-Type": "application/json"})
+            rebound = await stopped.json()
+            assert rebound["run_id"] == receipt["run_id"]
+            assert rebound["admission"]["body_sha256"] == hashlib.sha256(wire.encode()).hexdigest()
+            conflict = await client.post("/v1/runs/stop", json={**body, "input": "different request"}, headers=headers)
+            assert conflict.status == 409
+            assert "admission" not in await conflict.json()
+            unauthenticated = await client.post("/v1/runs/stop", json=body,
+                                                headers={**headers, "Authorization": "Bearer wrong-fixture-key"})
+            assert unauthenticated.status == 401
+            assert "admission" not in await unauthenticated.json()
     finally:
         restarted._run_idempotency_store.close()

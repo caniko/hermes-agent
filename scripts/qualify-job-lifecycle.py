@@ -23,8 +23,10 @@ REQUIRED = {
     "test_two_gateways_park_before_tools_and_keep_key_rotation_identity[local]",
     "test_two_gateways_park_before_tools_and_keep_key_rotation_identity[ssh]",
     "test_restarted_gateway_stops_orphan_jobs_before_terminal_status",
-    "test_stop_admission_fences_delayed_requests_after_restart[before_create]",
-    "test_stop_admission_fences_delayed_requests_after_restart[during_admission]",
+    "test_stop_admission_fences_delayed_requests_after_restart[ordinary-before_create]",
+    "test_stop_admission_fences_delayed_requests_after_restart[ordinary-during_admission]",
+    "test_stop_admission_fences_delayed_requests_after_restart[supervised-before_create]",
+    "test_stop_admission_fences_delayed_requests_after_restart[supervised-during_admission]",
     "test_system_provider_preserves_uid_and_confines_same_uid_workers",
 }
 
@@ -128,7 +130,7 @@ def qualify(report, provenance):
     if len(identities) != len(set(identities)):
         raise ValueError("Lifecycle proof contains duplicate or retried cases")
     suite_errors = root.findall(".//testsuite/error")
-    if missing or unsuccessful or suite_errors:
+    if missing or unsuccessful or suite_errors or len(cases) < 176:
         raise ValueError(f"Incomplete lifecycle proof: missing={sorted(missing)}, unsuccessful={unsuccessful}")
     if not re.fullmatch(r"[0-9a-f]{40}", provenance.get("revision") or ""):
         raise ValueError("Lifecycle proof requires an immutable source revision")

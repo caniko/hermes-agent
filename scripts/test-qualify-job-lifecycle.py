@@ -23,6 +23,8 @@ class QualificationTests(unittest.TestCase):
         suite = ET.SubElement(root, "testsuite")
         for name in sorted(qualification.REQUIRED):
             ET.SubElement(suite, "testcase", name=name)
+        for index in range(176 - len(qualification.REQUIRED)):
+            ET.SubElement(suite, "testcase", name=f"accepted-roster-fixture-{index}")
         path = Path(directory) / "report.xml"
         return path, root, suite
 
@@ -32,7 +34,7 @@ class QualificationTests(unittest.TestCase):
             ET.ElementTree(root).write(path)
             receipt = qualification.qualify(path, {"revision": "a" * 40})
             self.assertEqual(receipt["reportSha256"], hashlib.sha256(path.read_bytes()).hexdigest())
-            self.assertEqual(receipt["tests"], len(qualification.REQUIRED))
+            self.assertEqual(receipt["tests"], 176)
             self.assertFalse(receipt["paperclipDispatchQualified"])
 
     def test_unsuccessful_or_missing_proof_is_rejected(self):

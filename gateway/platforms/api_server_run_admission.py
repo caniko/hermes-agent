@@ -1,5 +1,7 @@
 """Stop an idempotent admission, including before its create request arrives."""
 
+import hashlib
+import json
 import time
 import uuid
 
@@ -19,6 +21,7 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
     if error is not None:
         return error
     try:
+        wire_body = await request.text()
         body = await request.json()
         if not isinstance(body, dict) or "hosted_room_dispatch" in body:
             raise ValueError("Stopping an admission requires the original run request")
@@ -45,6 +48,17 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
         return _replay_or_conflict(adapter, request, outcome, record, session_key, api._openai_error)
     run_id = record["run_id"]
     status = adapter._durable_run_status(request, run_id)
-    return _stop_owned_run(adapter, request, run_id, status,
-                           adapter._active_run_agents.get(run_id), adapter._active_run_tasks.get(run_id),
-                           _api_server=api)
+    response = _stop_owned_run(adapter, request, run_id, status,
+                               adapter._active_run_agents.get(run_id), adapter._active_run_tasks.get(run_id),
+                               _api_server=api)
+    if response.status != 200:
+        return response
+    # The authenticated scope/key/body reservation independently selects this
+    # root. Keep admission contents and credentials out of the public receipt.
+    receipt = json.loads(response.text)
+    receipt["admission"] = {
+        "version": 1, "root_run_id": run_id,
+        "key_sha256": hashlib.sha256(key.encode()).hexdigest(),
+        "body_sha256": hashlib.sha256(wire_body.encode()).hexdigest(),
+    }
+    return web.json_response(receipt)
