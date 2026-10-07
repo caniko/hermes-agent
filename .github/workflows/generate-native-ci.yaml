@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      GENERATOR_REVISION: 33b83dd4092607dfde77979d6146d3e8bba23fd2
+      GENERATOR_REVISION: b9775c5a8335bbb85ea4c2eac20db4ae7c7dad83
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         max-jobs = 1

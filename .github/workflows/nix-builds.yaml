@@ -4,7 +4,6 @@ name: Nix installable builds
 on:
   push:
     branches: ["**"]
-    tags-ignore: ["**"]
   pull_request:
   workflow_dispatch:
 
@@ -70,7 +69,7 @@ jobs:
         run: python3 scripts/test-qualify-job-lifecycle.py
 
       - name: Project setup 4
-        run: nix run github:caniko/simit/33b83dd4092607dfde77979d6146d3e8bba23fd2 -- init ci --platform github --ci-provider actions --runtime nix --check --diff
+        run: nix run github:caniko/simit/b9775c5a8335bbb85ea4c2eac20db4ae7c7dad83 -- init ci --platform github --ci-provider actions --runtime nix --check --diff
 
       - name: Build ${{ matrix.installable }}
         env:
