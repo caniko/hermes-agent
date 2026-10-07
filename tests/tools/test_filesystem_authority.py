@@ -36,6 +36,11 @@ def test_systemd_mount_properties_reach_manager_with_exact_paths(tmp_path, targe
         # The real parser can be qualified without root. User namespaces cannot
         # access the host's proc-FD pins; the system-provider test covers launch.
         supervisor = authority._system_supervisor(row, uid)
+        # Ubuntu 24.04's systemd 255 rejects PrivatePIDs before submitting any
+        # unit. This user-manager fixture qualifies mount-path parsing; the
+        # system-provider VM cases exercise the complete confinement policy.
+        supervisor.properties = tuple(prop for prop in supervisor.properties
+                                      if not prop.startswith("PrivatePIDs="))
         supervisor.execute = target
         supervisor._manager = "--user"
         return supervisor
