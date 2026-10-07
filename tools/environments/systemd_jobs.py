@@ -23,6 +23,16 @@ def quote_systemd_path(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _read_boot_identity(fence: str) -> str:
+    # procfs reports a zero file size. Older GNU cmp -s compares those sizes
+    # without reading, falsely proving a reboot even when the bytes are equal.
+    return (
+        f"IFS= read -r recorded_boot < {fence}/boot || exit 1; "
+        "IFS= read -r current_boot < /proc/sys/kernel/random/boot_id || exit 1; "
+        'test -n "$recorded_boot" && test -n "$current_boot" || exit 1; '
+    )
+
+
 class SystemdJobSupervisor:
     def __init__(self, execute: Callable[[str, str | None], subprocess.CompletedProcess], state_dir: str,
                  *, execution_user: int | None = None, properties: tuple[str, ...] = (),
@@ -115,10 +125,11 @@ class SystemdJobSupervisor:
         # mounted inode inside the final namespace before loading any workload
         # environment, so replacement during namespace setup cannot redirect it.
         root_checks = "".join(
-            f'test "$("$5" -Lc "%d:%i" -- {shlex.quote(path)})" = {shlex.quote(f"{device}:{inode}")} || exit 78; '
+            f'test "$("$4" -Lc "%d:%i" -- {shlex.quote(path)})" = {shlex.quote(f"{device}:{inode}")} || exit 78; '
             for path, device, inode in self.root_identities)
         launch = (f'( "$3" -s 9; test ! -e {fence}/sealed && test ! -e {fence}/{job.id}.stopped || exit 78; '
-                  f'"$4" -s {fence}/boot /proc/sys/kernel/random/boot_id ) 9<{fence}/gate; '
+                  + _read_boot_identity(fence)
+                  + f'test "$recorded_boot" = "$current_boot" ) 9<{fence}/gate; '
                   + root_checks
                   +
                   f"source {source}/environment; cd -- {shlex.quote(cwd)}; "
@@ -132,13 +143,16 @@ class SystemdJobSupervisor:
             exports = "\n".join(f"export {name}={shlex.quote(value)}" for name, value in environment.items())
             environment_script = "printf '%s' " + shlex.quote(exports)
         script = (
-            f"test ! -e {root}/fence/sealed || exit 78; cmp -s {root}/fence/boot /proc/sys/kernel/random/boot_id; "
+            f"test ! -e {root}/fence/sealed || exit 78; "
+            + _read_boot_identity(root + "/fence")
+            + 'test "$recorded_boot" = "$current_boot"; '
+            +
             f"umask 077; mkdir -- {dest}; cat > {dest}/input; "
             f"printf '%s' {shlex.quote(command)} > {dest}/command; "
             f"{environment_script} > {dest}/environment; "
             f"{shlex.join(argv)} -- \"$(command -v bash)\" --noprofile --norc -ec "
-            + shlex.quote('exec "$1" -i "$2" --noprofile --norc -ec "$3" job "$2" "${CREDENTIALS_DIRECTORY:-}" "$4" "$5" "$6"')
-            + f" launcher \"$(command -v env)\" \"$(command -v bash)\" {shlex.quote(launch)} \"$(command -v flock)\" \"$(command -v cmp)\" \"$(command -v stat)\"; "
+            + shlex.quote('exec "$1" -i "$2" --noprofile --norc -ec "$3" job "$2" "${CREDENTIALS_DIRECTORY:-}" "$4" "$5"')
+            + f" launcher \"$(command -v env)\" \"$(command -v bash)\" {shlex.quote(launch)} \"$(command -v flock)\" \"$(command -v stat)\"; "
             f"touch {dest}/accepted")
         self._run(self._gate(script), stdin)
         return job
@@ -159,7 +173,9 @@ class SystemdJobSupervisor:
         # conclusive AFTER the launch fence, or after an execution-host reboot.
         return (
             f"test -f {root}/fence/boot; test -d {dest} || test -f {root}/fence/sealed; "
-            f"if ! cmp -s {root}/fence/boot /proc/sys/kernel/random/boot_id; then echo settled; exit; fi; "
+            + _read_boot_identity(root + "/fence")
+            + 'if test "$recorded_boot" != "$current_boot"; then echo settled; exit; fi; '
+            +
             f"state=$(systemctl {self._manager} show {unit} -p LoadState -p ActiveState -p SubState -p ControlGroup) || "
             '{ case "$state" in *LoadState=not-found*) ;; *) exit 1;; esac; }; '
             'load= active= sub= group=; while IFS="=" read -r key value; do '

@@ -49,6 +49,7 @@ in
           "tests/tools/test_filesystem_claims.py "
           "tests/tools/test_filesystem_observation.py "
           "tests/tools/test_filesystem_authority.py "
+          "tests/tools/test_filesystem_authority_transport.py "
           "tests/tools/test_filesystem_authority_system.py "
           "tests/gateway/test_api_server_execution_context.py "
           "tests/gateway/test_gateway_command_line_matcher.py "
