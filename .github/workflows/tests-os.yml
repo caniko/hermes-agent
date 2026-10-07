@@ -73,7 +73,7 @@ jobs:
             timeout: ${{ github.event.repository.fork && 180 || 60 }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
@@ -199,7 +199,7 @@ jobs:
     timeout-minutes: ${{ github.event.repository.fork && 120 || 25 }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm

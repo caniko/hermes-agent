@@ -47,7 +47,7 @@ jobs:
           - cell: update-concurrency
             specs: e2e/update/update-concurrency.spec.ts
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The seeded install clones this checkout through a local bare origin.
           fetch-depth: 0
@@ -86,7 +86,7 @@ jobs:
               df -h / "$RUNNER_TEMP" | tail -n +2; free -g | head -2
               echo "procs=$(ps -e --no-headers | wc -l) upload-packs=$(pgrep -c -f git-upload-pack || true)"
               ps -eo pid,ppid,etimes,rss,args --sort=-rss | head -6 | cut -c1-200
-              ps -eo args | grep -E '(^|/)git[ -]' | cut -c1-160 | sort | uniq -c | sort -rn | head -8
+              pgrep -af '(^|/)git[ -]' | cut -d ' ' -f2- | cut -c1-160 | sort | uniq -c | sort -rn | head -8
               # Ancestry of the newest upload-pack: who is asking for all these packs?
               p=$(pgrep -n -f git-upload-pack || true)
               while [ -n "$p" ] && [ "$p" != 1 ]; do

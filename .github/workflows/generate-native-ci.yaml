@@ -21,12 +21,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      GENERATOR_REVISION: c8e1cc3cf40a72a9f2e99658057ac63c180498a5
+      GENERATOR_REVISION: 33b83dd4092607dfde77979d6146d3e8bba23fd2
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        max-jobs = 1
+        cores = 2
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Nix
-        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - name: Configure GitHub input transport
         run: |
           git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
@@ -45,7 +50,7 @@ jobs:
           find .simit/workflows .github/workflows -type f -print0 | sort -z | xargs -0 sha256sum > generated.sha256
           sha256sum simit.toml >> generated.sha256
       - name: Retain generated adoption files
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-ci-generation-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 31

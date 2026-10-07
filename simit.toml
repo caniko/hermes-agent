@@ -18,7 +18,7 @@ nix_builds = [".#minimal", ".#checks.x86_64-linux.target-job-lifecycle"]
 ".github/workflows/windows-install-update-e2e.yml" = ".simit/workflows/windows-install-update-e2e.yml.in"
 
 [ci.workflow_variables]
-generator_revision = "c8e1cc3cf40a72a9f2e99658057ac63c180498a5"
+generator_revision = "33b83dd4092607dfde77979d6146d3e8bba23fd2"
 release_tag_source = "https://github.com/NousResearch/hermes-agent.git"
 js_check_args = '''${{ github.event.repository.fork && '--concurrency 1' || '' }}'''
 linux_suite_runner = '''${{ vars.HERMES_LINUX_RUNNER || (github.event.repository.fork && 'ubuntu-24.04' || 'ubuntu-latest-96-core') }}'''
@@ -52,13 +52,20 @@ capture_results = true
 artifact_retention_days = 31
 extra_env = { NIX_CONFIG = "log-lines = 3000" }
 extra_setup = [
+  "printf '%s\\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'log-lines = 3000' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> \"$GITHUB_ENV\"",
   "python3 tests/nix/check-cold-python-source.py",
   "python3 scripts/test-qualify-job-lifecycle.py",
-  "nix run github:caniko/simit/c8e1cc3cf40a72a9f2e99658057ac63c180498a5 -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
+  "nix run github:caniko/simit/33b83dd4092607dfde77979d6146d3e8bba23fd2 -- init ci --platform github --ci-provider actions --runtime nix --check --diff",
 ]
-post_build = ["if [ \"$(cat \"$SIMIT_NIX_BUILD_RESULTS/installable\")\" = '.#checks.x86_64-linux.target-job-lifecycle' ]; then python3 scripts/qualify-job-lifecycle.py retain; fi"]
-post_build_always = ["python3 scripts/qualify-job-lifecycle.py retain-diagnostics"]
+post_build = [
+  "if [ \"$(cat \"$SIMIT_NIX_BUILD_RESULTS/installable\")\" = '.#checks.x86_64-linux.target-job-lifecycle' ]; then python3 scripts/qualify-job-lifecycle.py retain; fi",
+]
+post_build_always = [
+  "python3 scripts/qualify-job-lifecycle.py retain-diagnostics",
+]
 
 [release.artifacts]
 substituters = ["https://cache.nixos.org"]
-trusted_public_keys = ["cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="]
+trusted_public_keys = [
+  "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=",
+]
