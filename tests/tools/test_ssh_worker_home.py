@@ -55,6 +55,12 @@ def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
         skill.parent.mkdir(parents=True)
         skill.write_text(f"skill-{name}")
         remote = tmp_path / f"worker '{name}'"
+        remote_skill_directory = remote / "skills" / "example"
+        remote_skill_directory.mkdir(parents=True)
+        # Existing worker directory metadata must survive both native tar
+        # implementations, independently of temporary staging-directory modes.
+        remote.chmod(0o750)
+        remote_skill_directory.chmod(0o710)
         (profile / "config.yaml").write_text(
             f"terminal:\n  backend: ssh\n  ssh_host: {target['host']}\n  ssh_user: {target['user']}\n"
             f"  ssh_port: {target['port']}\n  ssh_key: {target['key']}\n"
@@ -74,6 +80,8 @@ def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
                                      ssh_config=_ssh_config_from_config(cfg))
                 try:
                     assert (remote / "skills/example/SKILL.md").read_text() == skill.read_text()
+                    assert remote.stat().st_mode & 0o777 == 0o750
+                    assert (remote / "skills/example").stat().st_mode & 0o777 == 0o710
                     proc = env._run_bash(
                         'printf "%s\\n" "$HERMES_HOME"; '
                         f'printf updated-{name} > "$HERMES_HOME/skills/example/SKILL.md"; '

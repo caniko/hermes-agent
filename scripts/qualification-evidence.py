@@ -49,7 +49,7 @@ def initialize(directory):
     require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "Only GitHub-hosted runners qualify")
     require(int(os.environ["GITHUB_RETENTION_DAYS"]) >= 31, "Repository/organization retention must allow 31 days")
     source = identity()
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=30).strip()
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, encoding="utf-8", timeout=30).strip()
     require(revision == source["head"], "Checkout is not the exact PR head")
     source.update({"tested_source": revision, "platform": platform.platform(), "machine": platform.machine(),
                    "receipt_tool_sha256": sha256(__file__),

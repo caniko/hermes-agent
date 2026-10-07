@@ -14,12 +14,13 @@ from tools.environments.systemd_jobs import SystemdJobSupervisor
 @pytest.mark.parametrize("uncertain", [False, True])
 @pytest.mark.parametrize("reset_unavailable", [False, True])
 @pytest.mark.parametrize("fence_unavailable", [False, True])
-def test_stop_fences_all_jobs_and_requires_each_settlement(tmp_path, uncertain, reset_unavailable, fence_unavailable):
+@pytest.mark.parametrize("job_count", [1, 35])
+def test_stop_fences_all_jobs_and_requires_each_settlement(tmp_path, uncertain, reset_unavailable, fence_unavailable, job_count):
     root = tmp_path / "worker state"
     fence = root / "fence"
     fence.mkdir(parents=True)
     (fence / "boot").write_bytes(Path("/proc/sys/kernel/random/boot_id").read_bytes())
-    ids = [f"{value:032x}" for value in range(1, 36)]
+    ids = [f"{value:032x}" for value in range(1, job_count + 1)]
     for job in ids:
         (root / f"job-{job}").mkdir()
     if uncertain:
