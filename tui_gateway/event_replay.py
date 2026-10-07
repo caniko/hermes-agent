@@ -3,8 +3,8 @@
 Every event frame through :func:`server.write_json` (hence ``_emit``) gets a per-session monotonic
 ``seq`` and lands in a small ring per session; a reconnecting client calls ``session.events.since``
 with its last seen seq and gets everything newer. Invariants: stdio TUI unaffected (``seq`` only on
-event frames; Ink ignores unknown keys); one lock guards counters + buffers, and write_json already
-serializes per-transport writes so stamping cannot reorder frames; memory bound =
+event frames; Ink ignores unknown keys); publication is serialized per session from stamping
+through transport admission, independently of the counter/buffer lock; memory bound =
 _REPLAY_BUFFER_MAX events AND _REPLAY_BUFFER_BYTES_MAX serialized bytes per session,
 _REPLAY_PROCESS_BYTES_MAX bytes across at most _REPLAY_SESSIONS_MAX sessions, oldest evicted
 FIFO. Evicted or never-retained (oversized) frames leave a truncation watermark so a
@@ -17,6 +17,7 @@ import json
 import threading
 import uuid
 from collections import OrderedDict, deque
+from contextlib import contextmanager
 
 # Seq counters live in-process, so a restart resets them to 1 while clients hold high
 # watermarks — events_since(sid, 97) would return [] with truncated=False forever. The
@@ -40,6 +41,39 @@ _replay_buffer_bytes: dict[str, int] = {}
 _replay_evicted_through: dict[str, int] = {}
 _replay_total_bytes = 0
 _replay_next_seq: dict[str, int] = {}
+_publish_lock = threading.Lock()
+_publish_gates: dict[str, tuple[threading.Lock, int]] = {}
+
+
+@contextmanager
+def publishing_event(obj: dict):
+    """Keep a session's replay sequence and transport admission in one order.
+
+    Gates exist only while writers use or wait for them; a slow session never
+    holds the replay lock or blocks publication to another session.
+    """
+    params = obj.get("params")
+    sid = (
+        params.get("session_id")
+        if obj.get("method") == "event" and isinstance(params, dict)
+        else None
+    )
+    if not sid:
+        yield
+        return
+    with _publish_lock:
+        gate, users = _publish_gates.get(sid, (threading.Lock(), 0))
+        _publish_gates[sid] = (gate, users + 1)
+    try:
+        with gate:
+            yield
+    finally:
+        with _publish_lock:
+            _, users = _publish_gates[sid]
+            if users == 1:
+                del _publish_gates[sid]
+            else:
+                _publish_gates[sid] = (gate, users - 1)
 
 
 def replay_epoch() -> str:

@@ -135,6 +135,112 @@ def test_concurrent_stamping_never_drops_or_duplicates_seq():
     assert replay_stats()["events"] == 8 * 200
 
 
+def test_concurrent_publish_keeps_transport_and_replay_in_the_same_order(monkeypatch):
+    from tui_gateway import server
+
+    first_at_write = threading.Event()
+    release_first = threading.Event()
+    second_done = threading.Event()
+    delivered = []
+    errors = []
+
+    class PausedTransport:
+        def write(self, frame):
+            seq = frame["params"]["seq"]
+            if seq == 1:
+                first_at_write.set()
+                if not release_first.wait(5):
+                    raise AssertionError("first writer was not released")
+            delivered.append(seq)
+            return True
+
+    monkeypatch.setitem(server._sessions, "ordered", {"transport": PausedTransport()})
+
+    def publish(done=None):
+        try:
+            assert server.write_json(_frame("ordered"))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if done is not None:
+                done.set()
+
+    first = threading.Thread(target=publish)
+    second = threading.Thread(target=publish, args=(second_done,))
+    first.start()
+    try:
+        assert first_at_write.wait(5)
+        second.start()
+        # On the broken path seq 2 overtakes the paused seq 1. A serialized
+        # publisher instead waits for the explicit release below.
+        second_done.wait(2)
+    finally:
+        release_first.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert not errors
+    assert delivered == [event["seq"] for event in events_since("ordered", 0)] == [1, 2]
+
+
+def test_failed_slow_writer_isolated_from_other_sessions_and_releases_publication(
+    monkeypatch,
+):
+    from tui_gateway import server
+
+    started = threading.Event()
+    release = threading.Event()
+    other_done = threading.Event()
+    failures = []
+    delivered = []
+
+    class FailingTransport:
+        def write(self, frame):
+            started.set()
+            assert release.wait(5)
+            raise OSError("disconnected")
+
+    class RecordingTransport:
+        def write(self, frame):
+            delivered.append((frame["params"]["session_id"], frame["params"]["seq"]))
+            return True
+
+    monkeypatch.setitem(server._sessions, "slow", {"transport": FailingTransport()})
+    monkeypatch.setitem(server._sessions, "other", {"transport": RecordingTransport()})
+
+    def publish(sid, done=None):
+        try:
+            server.write_json(_frame(sid))
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            if done is not None:
+                done.set()
+
+    slow = threading.Thread(target=publish, args=("slow",))
+    other = threading.Thread(target=publish, args=("other", other_done))
+    slow.start()
+    try:
+        assert started.wait(5)
+        other.start()
+        assert other_done.wait(5), (
+            "a slow session blocked another session's publication"
+        )
+    finally:
+        release.set()
+        slow.join(5)
+        if other.ident is not None:
+            other.join(5)
+
+    assert not slow.is_alive() and not other.is_alive()
+    assert len(failures) == 1 and isinstance(failures[0], OSError)
+    monkeypatch.setitem(server._sessions, "slow", {"transport": RecordingTransport()})
+    assert server.write_json(_frame("slow"))
+    assert delivered == [("other", 1), ("slow", 2)]
+
+
 def test_byte_budget_evicts_payloads_and_preserves_gap_semantics(monkeypatch):
     monkeypatch.setattr(event_replay, "_REPLAY_BUFFER_BYTES_MAX", 700)
     monkeypatch.setattr(event_replay, "_REPLAY_PROCESS_BYTES_MAX", 5_000)
