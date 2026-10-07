@@ -43,7 +43,11 @@ def test_profile_worker_homes_sync_and_execute_independently(tmp_path, monkeypat
     monkeypatch.setattr(SSHEnvironment, "init_session", lambda self: None)
 
     with connection as target:
-        _exercise_profiles(tmp_path, workspace, target, sentinel, personal)
+        previous_umask = os.umask(0o077)
+        try:
+            _exercise_profiles(tmp_path, workspace, target, sentinel, personal)
+        finally:
+            os.umask(previous_umask)
 
 
 def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
