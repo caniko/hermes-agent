@@ -13,8 +13,48 @@ concurrency:
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
+  test-plan:
+    name: Plan native test shards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Restore per-file duration cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: test_durations.json
+          key: test-durations-never-exact
+          restore-keys: |
+            test-durations-
+      - name: Freeze discovery into disjoint shards
+        id: plan
+        env:
+          SHARD_COUNT: @simit(suite_shards)@
+        run: |
+          set -euo pipefail
+          matrix=$(python3 scripts/ci/plan_python_tests.py create --directory "$RUNNER_TEMP/native-plan" --count "$SHARD_COUNT")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+      - name: Upload exact native test plan
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-test-plan-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-plan
+          if-no-files-found: error
+          retention-days: 31
+
   test:
-    name: Run tests
+    name: Run tests (shard ${{ matrix.index }})
+    needs: test-plan
+    strategy:
+      fail-fast: false
+      # Same worker/memory budget as the original full-suite job.
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.test-plan.outputs.matrix) }}
     # Preserve upstream's measured runner budget; forks use standard runners.
     # Owners can override the runner and matching file-worker budget.
     runs-on: @simit(linux_suite_runner)@
@@ -22,6 +62,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download exact native test plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.test-plan.outputs.artifact_id }}
+          path: ${{ runner.temp }}/native-plan
+      - name: Verify source and complete test coverage
+        env:
+          SHARD: ${{ matrix.index }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/plan_python_tests.py verify --directory "$RUNNER_TEMP/native-plan" --index "$SHARD"
+          mkdir "$RUNNER_TEMP/native-results"
+          cp "$RUNNER_TEMP/native-plan/plan.json" "$RUNNER_TEMP/native-plan/shard-$SHARD.txt" "$RUNNER_TEMP/native-results/"
+          git rev-parse HEAD > "$RUNNER_TEMP/native-results/revision"
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -75,11 +130,16 @@ jobs:
         # with bounded parallelism. No xdist, no shared workers, no
         # module-level state leakage between files.
         #
-        # No --files: the runner discovers the suite itself. The discovered
-        # set is identical to the list the removed matrix job used to pass in.
+        # The single plan uses this runner's discovery and proves that its
+        # disjoint shards cover it exactly once before any file executes.
         run: |
-          scripts/run_tests.sh
+          set -euo pipefail
+          status=0
+          scripts/run_tests.sh --files-from "$RUNNER_TEMP/native-plan/shard-$SHARD.txt" 2>&1 | tee "$RUNNER_TEMP/native-results/tests.log" || status=$?
+          echo "$status" > "$RUNNER_TEMP/native-results/exit-code"
+          exit "$status"
         env:
+          SHARD: ${{ matrix.index }}
           # Each file starts a fresh Python process; bound cold fork memory use.
           HERMES_TEST_WORKERS: @simit(suite_workers)@
           # A healthy 44-test compression file takes ~197s alone and can exceed
@@ -90,6 +150,15 @@ jobs:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+
+      - name: Upload native test execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-tests-${{ matrix.index }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-results
+          if-no-files-found: error
+          retention-days: 31
 
       - name: Save per-file duration cache (main only)
         # Only green first-attempt durations are written by the runner, so
@@ -158,8 +227,16 @@ jobs:
         # and must not share interpreter state.
         # tests/e2e/core/upgrade runs in its own job (e2e-upgrade) below.
         run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/e2e-results"
+          git rev-parse HEAD > "$RUNNER_TEMP/e2e-results/revision"
           mapfile -t files < <(find tests/e2e -name 'test_*.py' -not -path 'tests/e2e/core/upgrade/*' | sort)
-          scripts/run_tests.sh --include-integration "${files[@]}"
+          [ "${#files[@]}" -gt 0 ]
+          printf '%s\n' "${files[@]}" > "$RUNNER_TEMP/e2e-results/files.txt"
+          status=0
+          scripts/run_tests.sh --include-integration "${files[@]}" 2>&1 | tee "$RUNNER_TEMP/e2e-results/tests.log" || status=$?
+          echo "$status" > "$RUNNER_TEMP/e2e-results/exit-code"
+          exit "$status"
         env:
           # An e2e file is a process tree, not one CPU-bound pytest worker. With
           # 32 files at once the hosted run starved live children before their
@@ -180,6 +257,15 @@ jobs:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+
+      - name: Upload E2E execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-e2e-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e-results
+          if-no-files-found: error
+          retention-days: 31
 
   e2e-upgrade-plan:
     # One e2e-upgrade shard per suite directory: the files directly under
