@@ -471,7 +471,8 @@ def test_supervisor_uses_authenticated_socket_over_local_and_ssh(tmp_path, targe
             descriptor = {"authority": authority.store.authority_id, "principal": "test-controller", "request": "one", "fingerprint": "one",
                           "roots": [str(root)]}
             a = FilesystemSupervisor(call, descriptor, {"PATH": os.environ["PATH"]})
-            b = FilesystemSupervisor(call, {**descriptor, "request": "two", "fingerprint": "two"}, {})
+            b = FilesystemSupervisor(call, {**descriptor, "request": "two", "fingerprint": "two"},
+                                    {"PATH": os.environ["PATH"]})
             try:
                 a.prepare()
                 with pytest.raises(OwnershipPending):
