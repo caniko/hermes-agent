@@ -337,3 +337,15 @@ class SystemdJobSupervisor:
             return self._all_settled(self.jobs())
         except SupervisionError:
             return False
+
+    def cleanup_payloads(self) -> None:
+        # Call only after terminal persistence. Keep receipt directories and the
+        # fence so recovery and delayed submissions still see durable Stop proof.
+        if not self.settled():
+            raise SupervisionError("target jobs must settle before payload cleanup")
+        root = shlex.quote(self.state_dir)
+        self._run(self._gate(
+            f"test -f {root}/fence/sealed; "
+            f"for job in {root}/job-*; do test -d \"$job\" || continue; "
+            'rm -f -- "$job/input" "$job/command" "$job/environment" "$job/output"; done; '
+            f"rm -rf -- {root}/kernel-*"))

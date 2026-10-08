@@ -1,6 +1,7 @@
 """Run lifetime follows execution-host jobs, including after controller loss."""
 
 import asyncio
+import logging
 import posixpath
 import time
 from contextlib import suppress
@@ -114,6 +115,28 @@ async def settle_failed_run(run) -> None:
                 return
 
 
+async def cleanup_job_payloads(self, run_id, lifetime) -> None:
+    from tools.environments.systemd_jobs import SystemdJobSupervisor
+
+    if not isinstance(lifetime.supervisor, SystemdJobSupervisor):
+        return  # Shared filesystem authorities own their separate receipt ledger.
+    status = self._run_statuses.get(run_id, {})
+    if status.get("status") not in {"completed", "failed", "cancelled", "interrupted"}:
+        return
+    try:
+        # _set_run_status logs persistence errors; deletion must instead fail
+        # closed and verify the authenticated durable terminal record first.
+        if not self._run_idempotency_store.durable:
+            raise RuntimeError("terminal run persistence is not durable")
+        self._run_idempotency_store.update_status(run_id, status)
+        record = self._run_idempotency_store.status_for_run(self._run_owners[run_id], run_id)
+        if record is None or record["status"] != status:
+            raise RuntimeError("terminal run persistence is unavailable")
+        await asyncio.to_thread(lifetime.supervisor.cleanup_payloads)
+    except Exception:
+        logging.getLogger("gateway.platforms.api_server").exception("Retaining supervised payloads for run %s", run_id)
+
+
 def ensure_job_recovery(self, run_id: str, profile) -> None:
     status = self._run_statuses.get(run_id, {})
     if (not status.get("supervision_recovery_required") or run_id in self._active_run_tasks
@@ -146,6 +169,7 @@ def ensure_job_recovery(self, run_id: str, profile) -> None:
                         break
             self._set_run_status(run_id, "interrupted", last_event="run.interrupted",
                                  error="Gateway restarted; owned jobs have been stopped.")
+            await cleanup_job_payloads(self, run_id, lifetime)
         finally:
             self._active_run_tasks.pop(run_id, None)
             self._run_job_lifetimes.pop(run_id, None)
