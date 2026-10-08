@@ -144,8 +144,8 @@ class SystemdJobSupervisor:
             environment_script = "printf '%s' " + shlex.quote(exports)
         script = (
             f"test ! -e {root}/fence/sealed || exit 78; "
-            + _read_boot_identity(root + "/fence")
-            + 'test "$recorded_boot" = "$current_boot"; '
+            + "( " + _read_boot_identity(root + "/fence")
+            + 'test "$recorded_boot" = "$current_boot" ); '
             +
             f"umask 077; mkdir -- {dest}; cat > {dest}/input; "
             f"printf '%s' {shlex.quote(command)} > {dest}/command; "

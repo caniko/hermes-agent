@@ -54,6 +54,7 @@ in
       # case names and the assertion that preceded blocked teardown.
       status, output = worker.execute("cd /var/lib/hermes-qualification && set -o pipefail && XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus ${python} -m pytest -vv --tb=short -o addopts= -p tests._fixtures.qualification_diagnostics -o faulthandler_timeout=30 --junitxml=/var/lib/hermes-qualification/lifecycle.xml "
           "tests/tools/test_target_job_supervision.py "
+          "tests/tools/test_ssh_worker_home.py "
           "tests/tools/test_supervision_control_stdin.py "
           "tests/tools/test_supervision_stop_fence.py "
           "tests/tools/test_supervised_process_completion.py "

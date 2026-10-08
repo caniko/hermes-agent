@@ -61,6 +61,7 @@ def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
         skill.write_text(f"skill-{name}: café", encoding="utf-8")
         remote = tmp_path / f"worker '{name}'"
         remote.mkdir(mode=0o750)
+        remote.chmod(0o750)
         (profile / "config.yaml").write_text(
             f"terminal:\n  backend: ssh\n  ssh_host: {target['host']}\n  ssh_user: {target['user']}\n"
             f"  ssh_port: {target['port']}\n  ssh_key: {target['key']}\n"
