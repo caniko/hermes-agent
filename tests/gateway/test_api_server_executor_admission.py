@@ -66,15 +66,23 @@ async def test_configured_gate_fails_closed_and_reports_capacity(tmp_path, monke
     (tmp_path / "config.yaml").write_text(yaml.safe_dump({
         "gateway": {"api_server": {"admission_file": str(marker), "max_concurrent_runs": 1}}}))
     adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "fixture-key"}))
+    app = web.Application()
+    app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     try:
-        response = await adapter._handle_capabilities(MagicMock())
-        admission = json.loads(response.text)["features"]["runs_executor_admission"]
-        assert admission == {"version": 1, "accepting": False, "available_slots": 1}
-        marker.write_text(json.dumps({"version": 1, "accepting": True}))
-        with patch.object(adapter, "active_agent_work_count", return_value=1):
-            response = await adapter._handle_capabilities(MagicMock())
-        assert json.loads(response.text)["features"]["runs_executor_admission"] == {
-            "version": 1, "accepting": True, "available_slots": 0}
+        async with TestClient(TestServer(app)) as client:
+            unauthorized = await client.get("/v1/capabilities")
+            assert unauthorized.status == 401
+            headers = {"Authorization": "Bearer fixture-key"}
+            response = await client.get("/v1/capabilities", headers=headers)
+            assert response.status == 200
+            admission = (await response.json())["features"]["runs_executor_admission"]
+            assert admission == {"version": 1, "accepting": False, "available_slots": 1}
+            marker.write_text(json.dumps({"version": 1, "accepting": True}))
+            with patch.object(adapter, "active_agent_work_count", return_value=1):
+                response = await client.get("/v1/capabilities", headers=headers)
+            assert response.status == 200
+            assert (await response.json())["features"]["runs_executor_admission"] == {
+                "version": 1, "accepting": True, "available_slots": 0}
     finally:
         adapter._run_idempotency_store.close()
 
