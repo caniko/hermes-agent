@@ -91,3 +91,25 @@ def test_duration_cache_merges_only_each_shards_owned_measurements(tmp_path):
     with pytest.raises(ValueError, match="source"):
         plan_python_tests.merge_durations(root, output, results, 2, revision)
     assert json.loads((root / "test_durations.json").read_text()) == expected
+    (folder / "revision").write_text(revision)
+    for name, invalid in (
+        ("plan.json", b"{}"),
+        (shard["file"], b"tests/test_unowned.py\n"),
+        ("exit-code", b"1"),
+        ("test_durations.json", json.dumps({owned: -1}).encode()),
+        ("test_durations.json", json.dumps({owned: float("nan")}).encode()),
+        ("test_durations.json", None),
+    ):
+        path = folder / name
+        original = path.read_bytes()
+        if invalid is None:
+            path.unlink()
+        else:
+            path.write_bytes(invalid)
+        with pytest.raises((ValueError, FileNotFoundError)):
+            plan_python_tests.merge_durations(root, output, results, 2, revision)
+        assert json.loads((root / "test_durations.json").read_text()) == expected
+        path.write_bytes(original)
+    with pytest.raises(FileNotFoundError):
+        plan_python_tests.merge_durations(root, output, results, 3, revision)
+    assert json.loads((root / "test_durations.json").read_text()) == expected

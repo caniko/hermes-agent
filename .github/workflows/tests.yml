@@ -139,6 +139,9 @@ jobs:
           status=0
           scripts/run_tests.sh --files-from "$RUNNER_TEMP/native-plan/shard-$SHARD.txt" 2>&1 | tee "$RUNNER_TEMP/native-results/tests.log" || status=$?
           echo "$status" > "$RUNNER_TEMP/native-results/exit-code"
+          if [ -f test_durations.json ]; then
+            cp test_durations.json "$RUNNER_TEMP/native-results/"
+          fi
           exit "$status"
         env:
           SHARD: ${{ matrix.index }}
@@ -162,14 +165,45 @@ jobs:
           if-no-files-found: error
           retention-days: 31
 
-      - name: Save per-file duration cache (main only)
-        # Only green first-attempt durations are written by the runner, so
-        # a hang on main cannot ratchet its own bound upward.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('test_durations.json') != ''
+  test-durations:
+    name: Merge native test durations
+    needs: [test-plan, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download exact native test plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.test-plan.outputs.artifact_id }}
+          path: ${{ runner.temp }}/native-plan
+      - name: Download this attempt's native shard evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-tests-*-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-shards
+      - name: Merge only source-bound owned durations
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/plan_python_tests.py merge --directory "$RUNNER_TEMP/native-plan" \
+            --results "$RUNNER_TEMP/native-shards" --attempt "$ATTEMPT"
+      - name: Retain merged duration evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-test-durations-attempt-${{ github.run_attempt }}
+          path: test_durations.json
+          if-no-files-found: error
+          retention-days: 31
+      - name: Save per-file duration cache (main only, single writer)
+        # All shards succeeded; only their owner's healthy durations survive.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: test_durations.json
-          key: test-durations-${{ github.run_id }}
+          key: test-durations-${{ github.run_id }}-${{ github.run_attempt }}
 
   e2e:
     # Leave CPU for each file's real serve/gateway/MCP/SQLite child processes.

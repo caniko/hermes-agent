@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.run_tests_parallel import (
@@ -82,12 +84,56 @@ def verify_plan(root: Path, output: Path, index: int, revision: str) -> Path:
     return selected
 
 
+def merge_durations(
+    root: Path, directory: Path, results: Path, attempt: int, revision: str,
+) -> None:
+    plan_bytes = (directory / "plan.json").read_bytes()
+    plan = json.loads(plan_bytes)
+    merged = {}
+    for shard in plan["shards"]:
+        selected = verify_plan(root, directory, shard["index"], revision)
+        artifact = results / f"native-tests-{shard['index']}-attempt-{attempt}"
+        if (artifact / "revision").read_text(encoding="utf-8-sig").strip() != revision:
+            raise ValueError("duration artifact source does not match execution")
+        if (
+            (artifact / "plan.json").read_bytes() != plan_bytes
+            or (artifact / shard["file"]).read_bytes() != selected.read_bytes()
+        ):
+            raise ValueError("duration artifact does not match the test plan")
+        if (artifact / "exit-code").read_text(encoding="utf-8-sig").strip() != "0":
+            raise ValueError("cannot cache durations from a failed shard")
+        durations = json.loads(
+            (artifact / "test_durations.json").read_text(encoding="utf-8-sig")
+        )
+        if not isinstance(durations, dict):
+            raise ValueError("duration artifact must contain a file-to-duration map")
+        for name in selected.read_text(encoding="utf-8").splitlines():
+            # The runner omits unhealthy timings; inherited values for other
+            # shards must never overwrite their owner's healthy measurements.
+            if name not in durations:
+                continue
+            value = durations[name]
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError("duration must be a positive finite number")
+            merged[name] = value
+    if not merged:
+        raise ValueError("no healthy shard durations to cache")
+    # Validate every artifact before atomically replacing the previous cache.
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=root, delete=False) as f:
+        json.dump(merged, f, indent=2, sort_keys=True)
+        f.write("\n")
+        temporary = Path(f.name)
+    temporary.replace(root / "test_durations.json")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("create", "verify"))
+    parser.add_argument("command", choices=("create", "verify", "merge"))
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--index", type=int, default=1)
+    parser.add_argument("--results", type=Path)
+    parser.add_argument("--attempt", type=int)
     args = parser.parse_args()
     root = Path.cwd()
     revision = subprocess.check_output(
@@ -96,8 +142,12 @@ def main() -> None:
     if args.command == "create":
         plan = create_plan(root, args.directory, args.count, revision)
         print(json.dumps({"index": [shard["index"] for shard in plan["shards"]]}))
-    else:
+    elif args.command == "verify":
         print(verify_plan(root, args.directory, args.index, revision))
+    else:
+        if args.results is None or args.attempt is None:
+            parser.error("merge requires --results and --attempt")
+        merge_durations(root, args.directory, args.results, args.attempt, revision)
 
 
 if __name__ == "__main__":
