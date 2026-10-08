@@ -6,6 +6,10 @@ on:
       - .github/workflows/generate-native-ci.yaml
       - simit.toml
       - .simit/workflows/**
+      - scripts/ci/plan_python_tests.py
+      - tests/scripts/ci/test_plan_python_tests.py
+      - tests/ci/test_generation_artifact_coverage.py
+      - tests/ci/test_upgrade_release_baseline.py
 
 permissions:
   contents: read
@@ -15,6 +19,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  regressions:
+    name: Native CI regression contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          test-environment: 'true'
+      - name: Run CI regression contracts
+        env:
+          HERMES_TEST_WORKERS: "1"
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/native-ci-regressions"
+          git rev-parse HEAD > "$RUNNER_TEMP/native-ci-regressions/revision"
+          status=0
+          scripts/run_tests.sh tests/ci/test_generation_artifact_coverage.py \
+            tests/ci/test_upgrade_release_baseline.py tests/scripts/ci/test_plan_python_tests.py \
+            2>&1 | tee "$RUNNER_TEMP/native-ci-regressions/tests.log" || status=$?
+          echo "$status" > "$RUNNER_TEMP/native-ci-regressions/exit-code"
+          exit "$status"
+      - name: Retain CI regression evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-ci-regressions-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-ci-regressions
+          if-no-files-found: error
+          retention-days: 31
+
   generate:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
