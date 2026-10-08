@@ -441,6 +441,28 @@ async def test_bound_agent_edits_the_selected_directory_with_real_tools(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_runs_reject_non_object_json_before_admission(tmp_path):
+    adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "fixture-key"}))
+    with profile_scope(tmp_path):
+        app = web.Application()
+        app.router.add_post("/v1/runs", adapter._handle_runs)
+        try:
+            async with TestClient(TestServer(app)) as client:
+                for body in (None, [], ["work"], "work", 1, True):
+                    for key in ("", "invalid-object"):
+                        response = await client.post("/v1/runs", headers={
+                            "Authorization": "Bearer fixture-key", "Idempotency-Key": key,
+                            "Content-Type": "application/json",
+                        }, data=json.dumps(body))
+                        assert response.status == 400, await response.text()
+                        assert (await response.json())["error"]["message"] == "JSON body must be an object"
+                        assert not adapter._active_run_tasks
+                        assert not adapter._run_statuses
+        finally:
+            adapter._run_idempotency_store.close()
+
+
+@pytest.mark.asyncio
 async def test_bound_run_cannot_be_handed_to_a_live_owner(tmp_path, monkeypatch):
     from tools import bot_live_delivery
 

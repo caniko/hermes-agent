@@ -494,7 +494,32 @@ def test_supervisor_uses_authenticated_socket_over_local_and_ssh(tmp_path, targe
                 assert a.settled()
                 with pytest.raises(OwnershipPending):
                     b.prepare()
-                a.release()
+                row = authority.store.get("test-controller", "one")
+                provider = authority._supervisor(row, prepare=False)
+                control = __import__("pathlib").Path(provider.state_dir)
+                payloads = [control / ("job-" + job.id) / name
+                            for name in ("input", "command", "environment", "output")]
+                assert all(path.exists() for path in payloads)
+                cleanup = provider.cleanup_payloads
+                def unavailable_cleanup():
+                    raise SupervisionError("payload cleanup transport unavailable")
+                provider.cleanup_payloads = unavailable_cleanup
+                with pytest.raises(SupervisionError):
+                    a.release()
+                assert all(path.exists() for path in payloads)
+                provider.cleanup_payloads = cleanup
+                # Restart after the durable release decision but before its
+                # cleanup/reply. Replay must finish cleanup without replaying work.
+                authority.close()
+                authority = FilesystemAuthority(state, policy, supervisor_factory=lambda row, uid:
+                    SystemdJobSupervisor(target, str(state / row["id"])))
+                server.authority = authority
+                assert a.release()["state"] == "settled"
+                assert not any(path.exists() for path in payloads)
+                assert (control / "fence/sealed").is_file()
+                assert (control / ("job-" + job.id)).is_dir()
+                assert a.release()["state"] == "settled"
+                assert (root / "executions").read_text() == "once\n"
                 b.prepare()
                 # Exercise the authority/client boundary, not just the provider:
                 # serial five-second stops exceed this transport's existing bound.
@@ -516,3 +541,17 @@ def test_supervisor_uses_authenticated_socket_over_local_and_ssh(tmp_path, targe
                 server.shutdown()
                 thread.join()
                 authority.close()
+
+
+@pytest.mark.platforms("linux")
+def test_authority_rejects_writable_socket_parent(tmp_path):
+    from tools.environments.filesystem_authority_server import AuthorityServer
+
+    for mode in (0o770, 0o777, 0o1777):
+        parent = tmp_path / f"socket-{mode:o}"
+        parent.mkdir()
+        parent.chmod(mode)
+        with pytest.raises(PermissionError):
+            with AuthorityServer(str(parent / "control"), None):
+                pass
+        assert not (parent / "control").exists()

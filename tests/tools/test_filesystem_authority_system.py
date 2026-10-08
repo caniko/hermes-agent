@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import venv
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -30,6 +31,55 @@ def wait_for(predicate):
         if time.monotonic() >= deadline:
             pytest.fail("system-provider receipt did not settle")
         time.sleep(.1)
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires explicit operator authorization for the system provider")
+def test_system_provider_launches_guardian_from_copied_virtualenv(tmp_path):
+    runtime = tmp_path / "private-runtime"
+    venv.EnvBuilder(symlinks=False).create(runtime)
+    interpreter = runtime / "bin/python"
+    assert not interpreter.is_symlink()
+    assert interpreter.resolve().is_relative_to(tmp_path)
+    # Keep imports tied to the built candidate, not the editable source. The
+    # authority actually runs from a copied, non-standard interpreter path.
+    script = (f"import sys; sys.path[:] = {sys.path!r}; "
+              "from tests.tools.test_filesystem_authority_system import "
+              "test_system_provider_preserves_uid_and_confines_same_uid_workers as check; check()")
+    result = subprocess.run([str(interpreter), "-c", script], capture_output=True, text=True,
+                            timeout=180)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires explicit operator authorization for the system provider")
+def test_authority_client_rejects_foreign_server_before_sending_payload(tmp_path):
+    from tools.environments.filesystem_authority_server import request
+
+    tmp_path.chmod(0o711)
+    socket_path = tmp_path / "foreign-control"
+    # A root-owned socket inode does not prove the listener's identity. Bind as
+    # root, then listen as the workload UID, leaving the pathname protected.
+    script = ("import os,socket,sys; s=socket.socket(socket.AF_UNIX); "
+              "s.bind(sys.argv[1]); os.chmod(sys.argv[1], 0o666); "
+              "os.setuid(int(sys.argv[2])); s.listen(1); print('ready', flush=True); "
+              "c,_=s.accept(); payload=c.recv(4096); "
+              "print('leaked' if payload else 'protected', flush=True); "
+              "c.sendall(b'{\"ok\":true,\"result\":{}}\\n') if payload else None")
+    process = subprocess.Popen([sys.executable, "-c", script, str(socket_path),
+                                str(pwd.getpwnam("nobody").pw_uid)],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        with pytest.raises(PermissionError):
+            request(str(socket_path), {"command": "private payload"})
+        output, error = process.communicate(timeout=10)
+        assert process.returncode == 0, error
+        assert output.strip() == "protected"
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
 
 
 @pytest.mark.platforms("linux")
