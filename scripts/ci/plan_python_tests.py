@@ -107,7 +107,7 @@ def merge_durations(
         )
         if not isinstance(durations, dict):
             raise ValueError("duration artifact must contain a file-to-duration map")
-        for name in selected.read_text(encoding="utf-8").splitlines():
+        for name in selected.read_text(encoding="utf-8-sig").splitlines():
             # The runner omits unhealthy timings; inherited values for other
             # shards must never overwrite their owner's healthy measurements.
             if name not in durations:
