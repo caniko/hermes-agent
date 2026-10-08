@@ -225,9 +225,17 @@ class FilesystemAuthority:
         self._admissions.discard(row["id"])
         for fd in self._root_fds.pop(row["id"], []):
             os.close(fd)
+        # Settlement commits before destructive housekeeping. The provider also
+        # requires the retained target fence and positive per-job empty proof.
+        if self.store.get(row["principal"], row["request"])["state"] != "settled":
+            raise SupervisionError("durable ownership release is unavailable")
+        if self._jobs(row):
+            self._supervisor(row, prepare=False).cleanup_payloads()
 
     def _settle(self, row, *, stop=False, release=False):
         if row["state"] == "settled":
+            if release:
+                self._release(row)  # Retry cleanup after a lost reply or restart.
             return True
         if row["state"] not in ("sealed", "stopping"):
             return False
