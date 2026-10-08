@@ -130,7 +130,7 @@ def qualify(report, provenance):
     identities = [(case.get("classname"), case.get("name")) for case in cases]
     if len(identities) != len(set(identities)):
         raise ValueError("Lifecycle proof contains duplicate or retried cases")
-    roster = json.loads(Path(__file__).with_name("job-lifecycle-roster.json").read_text(encoding="utf-8"))
+    roster = json.loads(Path(__file__).with_name("job-lifecycle-roster.json").read_text(encoding="utf-8-sig"))
     missing_cases = {(classname, name) for classname, names in roster.items() for name in names} - set(identities)
     suite_errors = root.findall(".//testsuite/error")
     if missing or missing_cases or unsuccessful or suite_errors or len(cases) < 176:

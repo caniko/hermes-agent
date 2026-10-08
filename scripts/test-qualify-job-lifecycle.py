@@ -15,7 +15,7 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location("qualification", Path(__file__).with_name("qualify-job-lifecycle.py"))
 qualification = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(qualification)
-roster = json.loads(Path(__file__).with_name("job-lifecycle-roster.json").read_text(encoding="utf-8"))
+roster = json.loads(Path(__file__).with_name("job-lifecycle-roster.json").read_text(encoding="utf-8-sig"))
 
 
 class QualificationTests(unittest.TestCase):

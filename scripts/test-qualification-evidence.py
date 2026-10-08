@@ -26,7 +26,7 @@ class EvidenceTests(unittest.TestCase):
             directory = Path(location)
             self.report(directory)
             evidence.seal(directory, "success", True)
-            receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8"))
+            receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8-sig"))
             self.assertFalse(receipt["qualified"])
             self.assertEqual(receipt["reports"][0]["retries"], 0)
             self.assertEqual(receipt["members"]["report.xml"], evidence.sha256(directory / "report.xml"))
@@ -38,7 +38,7 @@ class EvidenceTests(unittest.TestCase):
                 self.report(directory, tag)
                 with self.assertRaisesRegex(RuntimeError, "retried"):
                     evidence.seal(directory, "success", True)
-                receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8"))
+                receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8-sig"))
                 self.assertFalse(receipt["qualified"])
                 self.assertEqual(receipt["reports"][0]["retries"], 1)
 
