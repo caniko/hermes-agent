@@ -86,6 +86,11 @@ jobs:
           assert not root.findall('.//error') and not root.findall('.//skipped')
           PY
           fi
+      - name: Run live executor admission assertions once
+        if: matrix.mode == 'green'
+        run: |
+          set -euo pipefail
+          scripts/run_tests.sh tests/gateway/test_api_server_executor_admission.py --junitxml="$EVIDENCE/executor-admission.xml" -o addopts= 2>&1 | tee "$EVIDENCE/executor-admission.log"
       - name: Seal original evidence
         if: always()
         run: python3 scripts/qualification-evidence.py seal "$EVIDENCE" '${{ matrix.mode == 'baseline-red' && job.status == 'success' && 'expected-red' || job.status }}' --strict-reports
@@ -94,7 +99,7 @@ jobs:
         with:
           name: worker-proof-admission-${{ matrix.mode }}-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/qualification/
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: error
 
   runner_readiness:
@@ -121,7 +126,7 @@ jobs:
         with:
           name: worker-proof-readiness-${{ github.event.pull_request.head.sha }}
           path: runner-readiness.json
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: error
 
   native:
@@ -175,7 +180,7 @@ jobs:
         with:
           name: worker-proof-native-${{ matrix.memory }}-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/qualification/
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: error
 
   retention:
@@ -197,7 +202,7 @@ jobs:
         with:
           name: worker-retention-${{ github.event.pull_request.head.sha }}
           path: retention.json
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: error
       - name: Require GREEN and retained audit
         run: |

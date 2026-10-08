@@ -1108,6 +1108,9 @@ group_sessions_per_user: true
 #
 #   platforms:
 #     api_server:
+#       # Optional live operator gate for new /v1/runs, without stopping admitted work.
+#       # File content: {"version":1,"accepting":true}; configured read errors fail closed.
+#       # admission_file: /etc/hermes-executor-admission.json
 #       enabled: true
 #       extra:
 #         key: "your-api-server-secret"

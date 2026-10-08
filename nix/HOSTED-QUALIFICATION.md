@@ -46,8 +46,10 @@ It records unavailable capacity as a failure. There is no local or smaller-runne
 fallback for this gate. The personal-account fork currently lacks this owner
 prerequisite. The portable lane can still provide separate source evidence.
 
-All required artifacts use 31 days of native GitHub retention. The final job
-reads actual creation and expiry timestamps and SHA-256 digests. Receipts remain
+Exact-head qualification artifacts request 32 days of native GitHub retention
+so provider timestamp rounding still meets the unchanged full 31-day minimum.
+The final job reads actual creation and expiry timestamps and SHA-256 digests,
+and retains its readback even when capacity or retention fails. Receipts remain
 unqualified until independent exact-source acceptance. Historical failed and
 accepted revisions retain their own disposition. This workflow grants no worker
 enablement, dispatch, composition, recovery execution, or deployment authority.

@@ -858,6 +858,7 @@ gateway:
     cors_origins: http://localhost:3000
     model_name: my-hermes
     max_concurrent_runs: 10   # concurrent-run cap; 0 disables the limit
+    # admission_file: /etc/hermes-executor-admission.json
     history_tool_output_max_chars: 0   # cap tool outputs in stored /v1/responses history; 0 = verbatim
 ```
 
@@ -878,6 +879,22 @@ All responses include security headers:
 - `Referrer-Policy: no-referrer` — prevents referrer leakage
 
 ## CORS
+
+### Live executor draining
+
+`gateway.api_server.admission_file` optionally names an operator-owned absolute
+JSON file: `{"version":1,"accepting":true}`. Change `accepting` to `false` to
+refuse new `POST /v1/runs` admissions with HTTP 503 `executor_draining`.
+A missing, unreadable or malformed configured file also closes admission.
+Without this setting, existing admission behavior remains available.
+
+The worker reads the file at admission, after asynchronous history preparation,
+and on capability probes. `features.runs_executor_admission` advertises version
+1, the live `accepting` boolean and `available_slots` (`null` for an unlimited
+worker). Capacity probes are advisory; the worker retains its concurrency gate.
+Existing idempotency keys, Stop-before-create tombstones, run observations and
+Stop calls remain usable during draining. Drain policy does not restart the
+worker, revoke admitted ownership, or authorize moving a run to another host.
 
 The API server does **not** enable browser CORS by default.
 
