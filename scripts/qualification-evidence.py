@@ -92,25 +92,6 @@ def seal(directory, outcome, strict_reports):
     require(not rejected, "; ".join(rejected))
 
 
-def expected_red(directory):
-    root = ET.parse(directory / "regression.xml").getroot()
-    cases = root.findall(".//testcase")
-    require(cases and not root.findall(".//skipped") and not root.findall(".//error"),
-            "Expected RED requires completed assertion failures, without errors or skips")
-    failed = [case.get("name", "") for case in cases if case.find("failure") is not None]
-    oracles = ["binds a delayed ID-less parent poll", "rejects a delayed parent SSE",
-               "holds live and recovery ownership", "stops and settles before returning"]
-    require(all(any(oracle in name for name in failed) for oracle in oracles),
-            f"Missing baseline regression failures: {failed}")
-    source_path = directory / "source.json"
-    source = json.loads(source_path.read_text(encoding="utf-8-sig"))
-    source.update({"baseline": "f6451f242d5cbb803e3c265e90f05b642e573203",
-                   "regression_fixture_sha256": sha256("packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts"),
-                   "expected_assertion_failures": failed})
-    source_path.write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8")
-    seal(directory, "expected-red", True)
-
-
 def artifacts(prefix, count, destination):
     source = identity()
     retained = []
@@ -148,8 +129,6 @@ def main():
     finish.add_argument("directory", type=Path)
     finish.add_argument("outcome")
     finish.add_argument("--strict-reports", action="store_true")
-    red = sub.add_parser("expected-red")
-    red.add_argument("directory", type=Path)
     audit = sub.add_parser("artifacts")
     audit.add_argument("prefix")
     audit.add_argument("count", type=int)
@@ -159,8 +138,6 @@ def main():
         initialize(args.directory)
     elif args.command == "seal":
         seal(args.directory, args.outcome, args.strict_reports)
-    elif args.command == "expected-red":
-        expected_red(args.directory)
     else:
         artifacts(args.prefix, args.count, args.destination)
 

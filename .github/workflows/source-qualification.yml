@@ -113,7 +113,9 @@ jobs:
           persist-credentials: false
       - name: Read supported provider controls before scheduling
         id: ready
-        run: python3 scripts/runner-readiness.py --memory-gb 64 --destination runner-readiness.json
+        # Preserve the 64 GiB MemTotal floor below. A nominal 64 GiB runner
+        # cannot meet it after kernel reservations; select the next larger size.
+        run: python3 scripts/runner-readiness.py --memory-gb 128 --destination runner-readiness.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
