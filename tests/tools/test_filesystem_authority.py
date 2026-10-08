@@ -280,7 +280,7 @@ def test_stop_fences_admitted_intent_even_when_no_exit_receipt_exists(tmp_path, 
             with monkeypatch.context() as lost_stop:
                 def fail_stop(*args, **kwargs):
                     raise SupervisionError("stop acknowledgement was lost")
-                lost_stop.setattr(provider, "stop_job", fail_stop)
+                lost_stop.setattr(provider, "stop_jobs", fail_stop)
                 with pytest.raises(SupervisionError, match="stop acknowledgement"):
                     call("stop")
                 receipt = authority.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=?", (job,)).fetchone()
@@ -378,7 +378,7 @@ def test_observation_reuses_exit_evidence_but_retains_ownership_until_stop(tmp_p
             with monkeypatch.context() as lost_stop:
                 def unavailable_stop(*args):
                     raise SupervisionError("stop acknowledgement was lost")
-                lost_stop.setattr(provider, "stop_job", unavailable_stop)
+                lost_stop.setattr(provider, "stop_jobs", unavailable_stop)
                 with pytest.raises(SupervisionError, match="stop acknowledgement"):
                     call("observe", job=job, offset=0)
                 recorded = authority.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=?", (job,)).fetchone()

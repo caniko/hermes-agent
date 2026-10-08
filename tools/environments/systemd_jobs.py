@@ -277,12 +277,12 @@ class SystemdJobSupervisor:
 
     def stop(self) -> None:
         self.seal()
-        self._stop_jobs(self.jobs())
+        self.stop_jobs(self.jobs())
 
     def stop_job(self, job: JobReceipt) -> None:
-        self._stop_jobs([job])
+        self.stop_jobs([job])
 
-    def _stop_jobs(self, jobs: list[JobReceipt]) -> None:
+    def stop_jobs(self, jobs: list[JobReceipt]) -> None:
         if not jobs:
             return
         folders, units = zip(*(self._job(job) for job in jobs))
