@@ -495,8 +495,20 @@ def test_supervisor_uses_authenticated_socket_over_local_and_ssh(tmp_path, targe
                     b.prepare()
                 a.release()
                 b.prepare()
+                # Exercise the authority/client boundary, not just the provider:
+                # serial five-second stops exceed this transport's existing bound.
+                ready = [root / f"slow-ready-{index}" for index in range(6)]
+                slow = [b.start(f'trap "" TERM; touch {shlex.quote(str(path))}; '
+                                'while :; do sleep .1; done',
+                                cwd=str(root), environment_names=("PATH",)) for path in ready]
+                wait_for(lambda: all(path.exists() for path in ready))
                 b.stop()
                 assert b.settled()
+                from tools.environments.job_supervision import JobState
+                assert all(b.inspect(owned) is JobState.SETTLED for owned in slow)
+                with pytest.raises(SupervisionError, match="sealed"):
+                    b.start("touch late-after-stop", cwd=str(root), environment_names=("PATH",))
+                assert not (root / "late-after-stop").exists()
             finally:
                 a.stop()
                 b.stop()

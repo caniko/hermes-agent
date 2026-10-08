@@ -254,6 +254,8 @@ async def test_run_remains_owned_until_jobs_settle_and_stop_fences_them(tmp_path
                     status = await (await client.get(f"/v1/runs/{run_id}", headers=headers)).json()
                     assert status["status"] == "running", status
                     assert run_id in adapter._active_run_tasks
+                    supervisor = adapter._run_job_lifetimes[run_id].supervisor
+                    owner = adapter._run_owners[run_id]
                     if tool == "execute_code":
                         with pytest.raises(asyncio.TimeoutError):
                             await asyncio.wait_for(asyncio.shield(adapter._active_run_tasks[run_id]), 2)
@@ -275,6 +277,16 @@ async def test_run_remains_owned_until_jobs_settle_and_stop_fences_them(tmp_path
                     if tool != "terminal":
                         from tools.code_kernel_remote import _REMOTE_KERNELS
                         assert not any(run_id in str(part) for key in _REMOTE_KERNELS for part in key)
+                    persisted = adapter._run_idempotency_store.status_for_run(owner, run_id)
+                    assert persisted["status"]["status"] == adapter._run_statuses[run_id]["status"]
+                    # Terminal persistence permits payload deletion, never deletion
+                    # of the durable fence that rejects a delayed target launch.
+                    retained = supervisor._run(
+                        f"find {shlex.quote(supervisor.state_dir)} -type f "
+                        r"\( -name input -o -name command -o -name environment -o -name output "
+                        r"-o -path '*/kernel-*/*' \) -print")
+                    assert not retained, retained
+                    supervisor._run(f"test -f {shlex.quote(supervisor.state_dir + '/fence/sealed')}")
         finally:
             for task in tasks:
                 (data / ("release-" + task)).touch()
@@ -332,7 +344,7 @@ async def test_stop_during_supervisor_preparation_cannot_construct_an_agent(tmp_
     with profile_scope(home):
         try:
             async with TestClient(TestServer(app)) as client:
-                response = await client.post("/v1/runs", headers=headers,
+                response = await client.post("/v1/runs", headers={**headers, "Idempotency-Key": "prepare-stop"},
                                              json={"input": "must not execute", "execution_context": context})
                 assert response.status == 202, await response.text()
                 run_id = (await response.json())["run_id"]
