@@ -24,7 +24,7 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     (tmp_path / "config.yaml").write_text(yaml.safe_dump({
         "terminal": {"backend": "local", "cwd": str(tmp_path)}}))
-    body = {"input": "maintain directory", "execution_context": {
+    body = {"input": "maintain directory café", "execution_context": {
         "version": 1, "backend": "local", "cwd": str(tmp_path), "lifetime": "wait_for_jobs"}}
     if not supervised:
         body.pop("execution_context")
@@ -102,6 +102,13 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
             rebound = await stopped.json()
             assert rebound["run_id"] == receipt["run_id"]
             assert rebound["admission"]["body_sha256"] == hashlib.sha256(wire.encode()).hexdigest()
+            payload = wire.encode("iso-8859-1")
+            stopped = await client.post("/v1/runs/stop", data=payload,
+                                        headers={**headers, "Content-Type": "application/json; charset=iso-8859-1"})
+            assert stopped.status == 200
+            rebound = await stopped.json()
+            assert rebound["run_id"] == receipt["run_id"]
+            assert rebound["admission"]["body_sha256"] == hashlib.sha256(payload).hexdigest()
             conflict = await client.post("/v1/runs/stop", json={**body, "input": "different request"}, headers=headers)
             assert conflict.status == 409
             assert "admission" not in await conflict.json()
