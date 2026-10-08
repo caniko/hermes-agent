@@ -106,6 +106,29 @@ def test_supervisor_waits_for_daemon_and_recovers_stop_fence(tmp_path, target):
 
 
 @pytest.mark.platforms("linux")
+@pytest.mark.parametrize("backend", ["local"])
+def test_supervised_local_command_ignores_non_identifier_inherited_environment(tmp_path, target, monkeypatch):
+    from tools.environments.local import LocalEnvironment
+    from tools.environments.supervised_execution import SupervisionBinding, bind_job_supervision
+    from tools.environments.systemd_jobs import SystemdJobSupervisor
+
+    supervisor = SystemdJobSupervisor(target, str(tmp_path / "state"))
+    supervisor.prepare()
+    monkeypatch.setenv("BASH_FUNC_fixture%%", "() { :; }")
+    monkeypatch.setenv("FIXTURE_INHERITED_VALUE", "kept exactly")
+    environment = LocalEnvironment(cwd=str(tmp_path))
+    try:
+        with bind_job_supervision(SupervisionBinding(supervisor.state_dir)):
+            process = environment._run_bash('printf "%s" "$FIXTURE_INHERITED_VALUE"')
+            assert process.wait(timeout=15) == 0
+            assert process.stdout.read() == "kept exactly"
+            process.stdout.close()
+    finally:
+        supervisor.stop()
+        environment.cleanup()
+
+
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("backend", ["local", "ssh"])
 def test_stop_waits_for_slow_jobs_together_and_settles_every_cgroup(tmp_path, target):
     from concurrent.futures import ThreadPoolExecutor

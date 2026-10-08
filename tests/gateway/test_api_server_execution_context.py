@@ -287,6 +287,76 @@ async def test_run_remains_owned_until_jobs_settle_and_stop_fences_them(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("backend", ["local", "ssh"])
+async def test_stop_during_supervisor_preparation_cannot_construct_an_agent(tmp_path, monkeypatch, backend, ssh_target):
+    import threading
+    import hermes_yaml as yaml
+    from tools.environments.job_supervision import SupervisionError
+    from tools.environments.systemd_jobs import SystemdJobSupervisor
+
+    home, data = tmp_path / "worker", tmp_path / "data"
+    home.mkdir()
+    data.mkdir()
+    terminal = {"backend": backend, "cwd": str(data)}
+    context = {"version": 1, "backend": backend, "cwd": str(data), "lifetime": "wait_for_jobs"}
+    if backend == "ssh":
+        terminal.update(ssh_host=ssh_target["host"], ssh_user=ssh_target["user"], ssh_port=ssh_target["port"],
+                        ssh_key=ssh_target["key"], ssh_hermes_home=str(tmp_path / "remote-worker"))
+        context["ssh"] = {key: ssh_target[key] for key in ("host", "user", "port")}
+    (home / "config.yaml").write_text(yaml.safe_dump({"terminal": terminal}))
+    adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "fixture-key"}))
+    entered, resume = threading.Event(), threading.Event()
+    prepared, constructed = [], []
+    original_prepare = SystemdJobSupervisor.prepare
+
+    def delayed_prepare(supervisor):
+        entered.set()
+        assert resume.wait(15)
+        original_prepare(supervisor)
+        prepared.append(supervisor)
+
+    def create_agent(**kwargs):
+        constructed.append(kwargs["session_id"])
+        agent = MagicMock()
+        agent.session_id = kwargs["session_id"]
+        agent.run_conversation.return_value = {"interrupted": True, "completed": False}
+        return agent
+
+    monkeypatch.setattr(SystemdJobSupervisor, "prepare", delayed_prepare)
+    monkeypatch.setattr(adapter, "_create_agent", create_agent)
+    app = web.Application()
+    app.router.add_post("/v1/runs", adapter._handle_runs)
+    app.router.add_post("/v1/runs/{run_id}/stop", adapter._handle_stop_run)
+    headers = {"Authorization": "Bearer fixture-key"}
+    with profile_scope(home):
+        try:
+            async with TestClient(TestServer(app)) as client:
+                response = await client.post("/v1/runs", headers=headers,
+                                             json={"input": "must not execute", "execution_context": context})
+                assert response.status == 202, await response.text()
+                run_id = (await response.json())["run_id"]
+                assert await asyncio.to_thread(entered.wait, 10)
+                stopped = await client.post(f"/v1/runs/{run_id}/stop", headers=headers)
+                assert stopped.status == 200, await stopped.text()
+                assert (await stopped.json())["status"] == "stopping"
+                resume.set()
+                await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 20)
+                assert not constructed
+                assert adapter._run_statuses[run_id]["status"] == "cancelled"
+                assert prepared and prepared[0].settled()
+                with pytest.raises(SupervisionError, match="sealed"):
+                    prepared[0].start("touch forbidden", cwd=str(data), environment_names=("PATH",))
+                assert not (data / "forbidden").exists()
+        finally:
+            resume.set()
+            for run_id in list(adapter._active_run_tasks):
+                adapter._stopping_run_ids.add(run_id)
+            if adapter._active_run_tasks:
+                await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 20)
+
+
+@pytest.mark.asyncio
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("backend", ["local", "ssh"])
 async def test_bound_agent_edits_the_selected_directory_with_real_tools(tmp_path, monkeypatch, backend, ssh_target):

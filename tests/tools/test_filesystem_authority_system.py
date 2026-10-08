@@ -113,6 +113,23 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
                 assert other.exit_code(isolated) == 0, other.output(isolated)
                 assert other.output(isolated).endswith("isolated")
                 assert not (roots[0] / "ungranted").exists()
+                # Retain the detached writer after its PID-namespace leader exits.
+                ready, release, finished = (maintained / name for name in
+                                            ("daemon-ready", "daemon-release", "daemon-finished"))
+                child = (f"touch {shlex.quote(str(ready))}; "
+                         f"while test ! -e {shlex.quote(str(release))}; do sleep .05; done; "
+                         f"printf finished > {shlex.quote(str(finished))}")
+                daemon = a.start(
+                    f"setsid bash -c {shlex.quote(child)} </dev/null >/dev/null 2>&1 & "
+                    f"while test ! -e {shlex.quote(str(ready))}; do sleep .05; done",
+                    cwd=str(maintained), environment_names=())
+                wait_for(lambda: a.main_exit_code(daemon) is not None)
+                assert ready.exists()
+                assert a.inspect(daemon) is JobState.RUNNING
+                assert not finished.exists()
+                release.touch()
+                wait_for(lambda: a.inspect(daemon) is JobState.SETTLED)
+                assert finished.read_text() == "finished"
                 a.seal()
                 assert a.settled()
                 with pytest.raises(OwnershipPending):

@@ -25,6 +25,9 @@ REQUIRED = {
     "test_stop_admission_fences_delayed_requests_after_restart[before_create]",
     "test_stop_admission_fences_delayed_requests_after_restart[during_admission]",
     "test_system_provider_preserves_uid_and_confines_same_uid_workers",
+    "test_stop_during_supervisor_preparation_cannot_construct_an_agent[local]",
+    "test_stop_during_supervisor_preparation_cannot_construct_an_agent[ssh]",
+    "test_supervised_local_command_ignores_non_identifier_inherited_environment[local]",
 }
 
 
