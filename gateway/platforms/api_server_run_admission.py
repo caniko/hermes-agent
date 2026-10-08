@@ -21,7 +21,7 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
     if error is not None:
         return error
     try:
-        wire_body = await request.text()
+        wire_body = await request.read()
         body = await request.json()
         if not isinstance(body, dict) or "hosted_room_dispatch" in body:
             raise ValueError("Stopping an admission requires the original run request")
@@ -59,6 +59,6 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
     receipt["admission"] = {
         "version": 1, "root_run_id": run_id,
         "key_sha256": hashlib.sha256(key.encode()).hexdigest(),
-        "body_sha256": hashlib.sha256(wire_body.encode()).hexdigest(),
+        "body_sha256": hashlib.sha256(wire_body).hexdigest(),
     }
     return web.json_response(receipt)

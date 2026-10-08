@@ -3,7 +3,7 @@
 This source successor starts from worker
 `72433d338b79b97f0e8ebe1cfdacb0e1238ea655`. It adds an admission proof to the
 authenticated idempotent Stop endpoint. The proof hashes the normalized key and
-the original UTF-8 HTTP body and names the reserved root. A conflicting request
+the original HTTP body bytes, before charset decoding, and names the reserved root. A conflicting request
 or failed authentication cannot receive a proof.
 
 The hosted portable lane exercises ordinary and supervised admission before
