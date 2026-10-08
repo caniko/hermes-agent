@@ -9,6 +9,19 @@ concurrency:
   group: worker-source-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: false
 jobs:
+  qualification_helpers:
+    name: Qualification helper contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: python3 scripts/test-qualify-job-lifecycle.py
+        if: always()
+      - run: python3 scripts/test-qualification-evidence.py
+        if: always()
   admission:
     name: Admission evidence / ${{ matrix.mode }}
     runs-on: ubuntu-24.04
