@@ -555,3 +555,23 @@ def test_authority_rejects_writable_socket_parent(tmp_path):
             with AuthorityServer(str(parent / "control"), None):
                 pass
         assert not (parent / "control").exists()
+        private = parent / "private"
+        private.mkdir(mode=0o700)
+        if mode == 0o1777 and os.geteuid() == 0:
+            # A protected service-owned child below root's sticky /tmp is safe;
+            # a socket directly in the shared sticky directory is not.
+            with AuthorityServer(str(private / "control"), None):
+                assert (private / "control").is_socket()
+        else:
+            with pytest.raises(PermissionError):
+                with AuthorityServer(str(private / "control"), None):
+                    pass
+            assert not (private / "control").exists()
+    protected = tmp_path / "protected"
+    protected.mkdir(mode=0o700)
+    alias = tmp_path / "alias"
+    alias.symlink_to(protected, target_is_directory=True)
+    with pytest.raises(OSError):
+        with AuthorityServer(str(alias / "control"), None):
+            pass
+    assert not (protected / "control").exists()
