@@ -99,7 +99,8 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
                 assert (maintained / "maintained").stat().st_gid == workload.pw_gid
                 assert a.output(job) == a.runtime_dir + "/home"
                 assert not (maintained / ".hermes").exists()
-                probe = a.start(f"! cat -- {shlex.quote(str(sibling))} && ! cat -- {shlex.quote(str(credentials))} && printf scoped",
+                probe = a.start(f"! cat -- /proc/1/fd/2 && ! cat -- {shlex.quote(str(sibling))} "
+                    f"&& ! cat -- {shlex.quote(str(credentials))} && printf scoped",
                     cwd=str(maintained), environment_names=())
                 wait_for(lambda: a.main_exit_code(probe) is not None)
                 assert a.exit_code(probe) == 0, a.output(probe)
@@ -124,6 +125,7 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
                     f"while test ! -e {shlex.quote(str(ready))}; do sleep .05; done",
                     cwd=str(maintained), environment_names=())
                 wait_for(lambda: a.main_exit_code(daemon) is not None)
+                assert a.main_exit_code(daemon) == 0  # Foreground exit precedes descendant settlement.
                 assert ready.exists()
                 assert a.inspect(daemon) is JobState.RUNNING
                 assert not finished.exists()
