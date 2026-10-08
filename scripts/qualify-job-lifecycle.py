@@ -130,9 +130,12 @@ def qualify(report, provenance):
     identities = [(case.get("classname"), case.get("name")) for case in cases]
     if len(identities) != len(set(identities)):
         raise ValueError("Lifecycle proof contains duplicate or retried cases")
+    roster = json.loads(Path(__file__).with_name("job-lifecycle-roster.json").read_text(encoding="utf-8"))
+    missing_cases = {(classname, name) for classname, names in roster.items() for name in names} - set(identities)
     suite_errors = root.findall(".//testsuite/error")
-    if missing or unsuccessful or suite_errors or len(cases) < 176:
-        raise ValueError(f"Incomplete lifecycle proof: missing={sorted(missing)}, unsuccessful={unsuccessful}")
+    if missing or missing_cases or unsuccessful or suite_errors or len(cases) < 176:
+        raise ValueError(f"Incomplete lifecycle proof: missing={sorted(missing)}, "
+                         f"missing_cases={sorted(missing_cases)}, unsuccessful={unsuccessful}")
     if not re.fullmatch(r"[0-9a-f]{40}", provenance.get("revision") or ""):
         raise ValueError("Lifecycle proof requires an immutable source revision")
     return {

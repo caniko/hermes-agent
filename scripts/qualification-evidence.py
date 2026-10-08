@@ -71,7 +71,8 @@ def seal(directory, outcome, strict_reports):
         identities = [(case.get("classname"), case.get("name")) for case in cases]
         failures = root.findall(".//failure") + root.findall(".//error")
         skipped = root.findall(".//skipped")
-        retried = [node for node in root.iter() if "retry" in node.tag.lower() or "flaky" in node.tag.lower()]
+        retried = [node for node in root.iter()
+                   if any(marker in node.tag.lower() for marker in ("retry", "rerun", "flaky"))]
         if outcome == "success":
             if len(identities) != len(set(identities)):
                 rejected.append(f"Duplicate/retried JUnit cases: {path}")
