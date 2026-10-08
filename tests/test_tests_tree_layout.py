@@ -28,8 +28,9 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # "installation": python driver for the tests/install shell e2e assets.
 # "_fixtures": topic modules tests/conftest.py is split into — suite-wide
 # plumbing (env filtering, live-system guard, platform gating), not tests.
+# "nix": cold-store packaging qualification invoked by Nix, not a Python package.
 _NON_MIRROR_DIRS = {
-    "compat", "installation", "_fixtures",
+    "compat", "installation", "_fixtures", "nix",
     "ci", "conformance", "dashboard", "desktop", "docker", "e2e", "evals",
     "fakes", "fixtures", "honcho_plugin", "install", "integration", "manual",
     "monitoring", "openviking_plugin", "perf_guards", "scripts", "secret_sources",

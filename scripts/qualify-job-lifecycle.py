@@ -16,6 +16,10 @@ REQUIRED = {
     "test_supervisor_supplies_eof_without_consuming_parent_stdin",
     "test_supervisor_waits_for_daemon_and_recovers_stop_fence[local]",
     "test_supervisor_waits_for_daemon_and_recovers_stop_fence[ssh]",
+    "test_supervisor_preserves_environment_names_used_by_boot_checks[local]",
+    "test_supervisor_preserves_environment_names_used_by_boot_checks[ssh]",
+    "test_profile_worker_homes_sync_and_execute_independently[shell]",
+    "test_profile_worker_homes_sync_and_execute_independently[openssh]",
     "test_stop_waits_for_slow_jobs_together_and_settles_every_cgroup[local]",
     "test_stop_waits_for_slow_jobs_together_and_settles_every_cgroup[ssh]",
     "test_systemd_submission_delayed_past_seal_cannot_execute_work[local]",
@@ -26,6 +30,7 @@ REQUIRED = {
     "test_stop_admission_fences_delayed_requests_after_restart[before_create]",
     "test_stop_admission_fences_delayed_requests_after_restart[during_admission]",
     "test_system_provider_preserves_uid_and_confines_same_uid_workers",
+    "test_request_client_needs_only_stdlib_and_authenticates_the_peer",
 }
 
 DIAGNOSTIC_MARKER = "HERMES_LIFECYCLE_DIAGNOSTIC_V1 "
@@ -99,10 +104,10 @@ def retain_diagnostics():
     log_path = evidence / "build.log"
     if not log_path.exists():
         return
-    log = log_path.read_text()
+    log = log_path.read_text(encoding="utf-8-sig")
     if DIAGNOSTIC_MARKER not in log:
         return  # A timed-out or unstarted suite is not a completed report.
-    revision = (evidence / "revision").read_text().strip()
+    revision = (evidence / "revision").read_text(encoding="utf-8-sig").strip()
     recovered = recover_diagnostics(log, revision)
     diagnostic = {
         "schemaVersion": 1, "scope": "hermes-lifecycle-diagnostics",
@@ -111,7 +116,7 @@ def retain_diagnostics():
     }
     for name, raw in recovered.items():
         (evidence / name).write_bytes(raw)
-    (evidence / "diagnostics.json").write_text(json.dumps(diagnostic, indent=2) + "\n")
+    (evidence / "diagnostics.json").write_text(json.dumps(diagnostic, indent=2) + "\n", encoding="utf-8")
 
 
 def qualify(report, provenance):
@@ -146,17 +151,17 @@ def qualify(report, provenance):
 
 def retain():
     evidence = Path(os.environ["SIMIT_NIX_BUILD_RESULTS"])
-    if (evidence / "installable").read_text().strip() != ".#checks.x86_64-linux.target-job-lifecycle":
+    if (evidence / "installable").read_text(encoding="utf-8-sig").strip() != ".#checks.x86_64-linux.target-job-lifecycle":
         raise ValueError("Unexpected lifecycle installable")
-    results = json.loads((evidence / "result.json").read_text())
+    results = json.loads((evidence / "result.json").read_text(encoding="utf-8-sig"))
     if len(results) != 1 or set(results[0]["outputs"]) != {"out"}:
         raise ValueError("Expected one lifecycle output")
     output = Path(results[0]["outputs"]["out"])
     if not re.fullmatch(r"/nix/store/[a-z0-9]{32}-[^/]+", str(output)):
         raise ValueError("Lifecycle output must be a store path")
-    receipt = json.loads((output / "receipt.json").read_text())
+    receipt = json.loads((output / "receipt.json").read_text(encoding="utf-8-sig"))
     checked = qualify(output / "lifecycle.xml", receipt["source"])
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, encoding="utf-8").strip()
     if receipt != checked or receipt["source"]["revision"] != revision:
         raise ValueError("Lifecycle receipt does not match the checkout and report")
     for name in ["receipt.json", "lifecycle.xml"]:
@@ -173,5 +178,5 @@ if __name__ == "__main__":
         emit_diagnostics(report, source)
     else:
         report, source, destination = map(Path, sys.argv[1:])
-        receipt = qualify(report, json.loads(source.read_text()))
-        destination.write_text(json.dumps(receipt, indent=2) + "\n")
+        receipt = qualify(report, json.loads(source.read_text(encoding="utf-8-sig")))
+        destination.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")

@@ -191,20 +191,24 @@ class SSHEnvironment(BaseEnvironment):
         base = self._remote_hermes_home
         parents = unique_parent_dirs(files)
         if parents:
-            self._run_ssh_checked(quoted_mkdir_command(parents), 30, "remote mkdir failed",
+            self._run_ssh_checked("umask 077; " + quoted_mkdir_command(parents), 30, "remote mkdir failed",
                                   f"Remote directory setup on {self.host}")
 
         # Symlink staging avoids fragile GNU tar --transform rules. On Windows
         # without Developer Mode symlink creation raises OSError winerror 1314;
         # only that case falls back to a plain copy, other OSErrors re-raise.
-        with tempfile.TemporaryDirectory(prefix="hermes-ssh-bulk-") as staging:
+        with tempfile.TemporaryDirectory(prefix="hermes-ssh-bulk-") as scratch:
+            staging = os.path.join(scratch, "payload")
+            os.mkdir(staging)
+            relative_files = []
             for host_path, remote_path in files:
                 try:
-                    rel_remote = os.path.relpath(remote_path, base)
+                    rel_remote = posixpath.relpath(remote_path, base)
                 except ValueError as exc:
                     raise RuntimeError(f"remote path {remote_path!r} is not under sync base {base!r}") from exc
                 if rel_remote == "." or rel_remote.startswith("../"):
                     raise RuntimeError(f"remote path {remote_path!r} escapes sync base {base!r}")
+                relative_files.append("./" + rel_remote)
                 staged = os.path.join(staging, rel_remote)
                 os.makedirs(os.path.dirname(staged), exist_ok=True)
                 try:
@@ -214,10 +218,12 @@ class SSHEnvironment(BaseEnvironment):
                         raise
                     shutil.copy2(host_path, staged)
 
-            # --no-overwrite-dir keeps tar from stamping the staging dir's mode onto
-            # existing dirs (e.g. /home/<user>); a umask-002 0775 home breaks sshd StrictModes.
-            ssh_cmd = self._build_ssh_command() + [f"tar xf - --no-overwrite-dir -C {shlex.quote(base)}"]
-            tar_proc = subprocess.Popen(["tar", "-chf", "-", "-C", staging, "."], stdin=subprocess.DEVNULL,
+            # File-only entries preserve existing directory metadata on GNU and
+            # BSD tar. NUL delimiters keep newlines and option-looking names literal.
+            manifest = os.path.join(scratch, "upload-files")
+            Path(manifest).write_bytes(b"".join(os.fsencode(name) + b"\0" for name in relative_files))
+            ssh_cmd = self._build_ssh_command() + [f"tar xf - -C {shlex.quote(base)}"]
+            tar_proc = subprocess.Popen(["tar", "-chf", "-", "-C", staging, "--null", "-T", manifest], stdin=subprocess.DEVNULL,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 ssh_proc = subprocess.Popen(ssh_cmd, stdin=tar_proc.stdout,

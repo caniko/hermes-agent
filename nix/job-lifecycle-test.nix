@@ -1,4 +1,9 @@
-{pkgs, package, source, revision}: let
+{
+  pkgs,
+  package,
+  source,
+  revision,
+}: let
   testPackage = package.override {extraDependencyGroups = ["dev"];};
   python = "${testPackage.hermesVenv}/bin/python3";
 in
@@ -10,7 +15,15 @@ in
         cores = 2;
         diskSize = 16384;
       };
-      environment.systemPackages = with pkgs; [bash coreutils findutils git openssh systemd util-linux];
+      environment.systemPackages = with pkgs; [
+        bash
+        coreutils
+        findutils
+        git
+        openssh
+        systemd
+        util-linux
+      ];
       # The disposable transport starts its own loopback sshd. The NixOS module
       # supplies OpenSSH's privilege-separation accounts and runtime directory.
       services.openssh.enable = true;
@@ -41,6 +54,7 @@ in
       # case names and the assertion that preceded blocked teardown.
       status, output = worker.execute("cd /var/lib/hermes-qualification && set -o pipefail && XDG_RUNTIME_DIR=/run/user/0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus ${python} -m pytest -vv --tb=short -o addopts= -p tests._fixtures.qualification_diagnostics -o faulthandler_timeout=30 --junitxml=/var/lib/hermes-qualification/lifecycle.xml "
           "tests/tools/test_target_job_supervision.py "
+          "tests/tools/test_ssh_worker_home.py "
           "tests/tools/test_supervision_control_stdin.py "
           "tests/tools/test_supervision_stop_fence.py "
           "tests/tools/test_supervised_process_completion.py "
@@ -49,6 +63,7 @@ in
           "tests/tools/test_filesystem_claims.py "
           "tests/tools/test_filesystem_observation.py "
           "tests/tools/test_filesystem_authority.py "
+          "tests/tools/test_filesystem_authority_transport.py "
           "tests/tools/test_filesystem_authority_system.py "
           "tests/gateway/test_api_server_execution_context.py "
           "tests/gateway/test_gateway_command_line_matcher.py "

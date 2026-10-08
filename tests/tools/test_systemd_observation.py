@@ -11,7 +11,7 @@ from tools.environments.systemd_jobs import SystemdJobSupervisor
 
 
 @pytest.mark.platforms("linux")
-@pytest.mark.parametrize("failure", [None, "lost-control", "missing-boot", "manager-error"])
+@pytest.mark.parametrize("failure", [None, "lost-control", "missing-boot", "empty-boot", "manager-error"])
 @pytest.mark.parametrize("load,active,stopped,state,exit_code", [
     ("loaded", "inactive", False, JobState.SETTLED, 7),
     ("not-found", "inactive", True, JobState.SETTLED, -15),
@@ -27,6 +27,8 @@ def test_observation_uses_one_transport_and_keeps_unknown_owned(
     (fence / "boot").write_bytes(Path("/proc/sys/kernel/random/boot_id").read_bytes())
     if failure == "missing-boot":
         (fence / "boot").unlink()
+    if failure == "empty-boot":
+        (fence / "boot").write_bytes(b"\n")
     job = JobReceipt("a" * 32)
     folder = root / f"job-{job.id}"
     folder.mkdir()
@@ -41,7 +43,7 @@ def test_observation_uses_one_transport_and_keeps_unknown_owned(
                        + f"LoadState={load} ActiveState={active} SubState=dead ControlGroup= "
                        + "ExecMainCode=1 ExecMainStatus=7\n")
     if failure == "manager-error":
-        manager.write_text("#!/usr/bin/env bash\nexit 1\n")
+        manager.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
     manager.chmod(0o700)
     environment = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
     calls = []

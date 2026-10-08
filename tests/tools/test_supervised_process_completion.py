@@ -21,7 +21,8 @@ def test_collected_unit_requires_stop_proof_to_complete_its_handle(tmp_path, sto
     job_id = "a" * 32
     folder = state / f"job-{job_id}"
     folder.mkdir()
-    (folder / "output").write_text("retained job output\n")
+    output = "\ufeffretained café job output\n"
+    (folder / "output").write_text(output, encoding="utf-8")
     if stopped:
         (fence / f"{job_id}.stopped").touch()
     binaries = tmp_path / "bin"
@@ -46,5 +47,5 @@ def test_collected_unit_requires_stop_proof_to_complete_its_handle(tmp_path, sto
     assert supervisor.main_exit_code(job) == -15
     handle = SupervisedProcessHandle(supervisor, job)
     assert handle.wait(timeout=5) == -15
-    assert handle.stdout.read() == "retained job output\n"
+    assert handle.stdout.read() == output
     handle.stdout.close()

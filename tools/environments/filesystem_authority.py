@@ -6,11 +6,11 @@ The CLI/transport lives in filesystem_authority_server, outside model tool schem
 """
 
 import base64
-import fcntl
+import fcntl  # windows-footgun: ok — Linux target service, never imported by portable controllers.
 import hashlib
 import json
 import os
-import pwd
+import pwd  # windows-footgun: ok — Linux target service resolves enrolled kernel UIDs.
 import re
 import subprocess
 import threading
@@ -31,7 +31,7 @@ class FilesystemAuthority:
             raise ValueError("each control identity requires a distinct principal")
         self.state = state.resolve(strict=True)
         stat = self.state.stat()
-        if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+        if stat.st_uid != os.getuid() or stat.st_mode & 0o077:  # windows-footgun: ok — Linux authority ownership.
             raise ValueError("authority state must be private and owned by the service user")
         self._anchor = open(self.state / "authority.lock", "a", encoding="utf-8")
         try:

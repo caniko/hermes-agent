@@ -9,7 +9,7 @@ you are about to push:
     python3 scripts/audit_pr_attribution.py --fix      # create mapping files
 
 Logic (kept in sync with contributor-check.yml):
-  - scans ``git log $(git merge-base origin/main HEAD)..HEAD --format=%ae``
+  - scans the selected ``--base`` / ``--head`` comparison (defaults: origin/main / HEAD)
   - skips teknium/bot emails and ``<id>+<login>@users.noreply.github.com``
     (CI auto-resolves those)
   - everything else must have ``contributors/emails/<email>`` or a legacy
@@ -55,9 +55,11 @@ def run(*args: str, check: bool = True) -> str:
     return result.stdout.strip()
 
 
-def new_emails() -> list[str]:
-    base = run("git", "merge-base", "origin/main", "HEAD")
-    log = run("git", "log", f"{base}..HEAD", "--format=%ae", "--no-merges", check=False)
+def new_emails(base: str = "origin/main", head: str = "HEAD") -> list[str]:
+    base = run("git", "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}")
+    head = run("git", "rev-parse", "--verify", "--end-of-options", f"{head}^{{commit}}")
+    ancestor = run("git", "merge-base", base, head)
+    log = run("git", "log", f"{ancestor}..{head}", "--format=%ae", "--no-merges")
     return sorted({e for e in log.splitlines() if e.strip()})
 
 
@@ -102,10 +104,12 @@ def resolve_login(email: str) -> tuple[str, str] | None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fix", action="store_true",
-                        help="auto-create contributors/emails/ mapping files")
+                         help="auto-create contributors/emails/ mapping files")
+    parser.add_argument("--base", default="origin/main", help="PR base revision")
+    parser.add_argument("--head", default="HEAD", help="PR head revision")
     args = parser.parse_args()
 
-    unmapped = [e for e in new_emails() if not is_mapped(e)]
+    unmapped = [e for e in new_emails(args.base, args.head) if not is_mapped(e)]
     if not unmapped:
         print("✅ All contributor emails on this branch are mapped.")
         return 0

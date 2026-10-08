@@ -18,7 +18,11 @@ let
   python = pythonLock.interpreter;
   pythonPackages = python.pkgs;
 
-  workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = pythonSrc; };
+  # Read lock/project metadata from the original source: --no-build cannot
+  # register a cold cleanSourceWith path before uv2nix reads its TOML files.
+  # The wheel still uses the filtered payload through the package override.
+  workspaceRoot = ./..;
+  workspace = uv2nix.lib.workspace.loadWorkspace { inherit workspaceRoot; };
   hacks = callPackage pyproject-nix.build.hacks { };
 
   overlay = workspace.mkPyprojectOverlay {
@@ -69,17 +73,21 @@ let
       # The locked sdist has no build-system metadata; setup.py imports
       # setuptools and uses CFFI to compile the bundled libolm.
       python-olm = prev.python-olm.overrideAttrs (old: {
-        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ final.resolveBuildSystem {
-          setuptools = [ ];
-          cffi = [ ];
-        };
+        nativeBuildInputs =
+          (old.nativeBuildInputs or [ ])
+          ++ final.resolveBuildSystem {
+            setuptools = [ ];
+            cffi = [ ];
+          };
       });
       # [kittentts] locks misaki as a git source. uv.lock records no build
       # backend for it, so supply the hatchling its pyproject declares.
       misaki = prev.misaki.overrideAttrs (old: {
-        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ final.resolveBuildSystem {
-          hatchling = [ ];
-        };
+        nativeBuildInputs =
+          (old.nativeBuildInputs or [ ])
+          ++ final.resolveBuildSystem {
+            hatchling = [ ];
+          };
       });
     };
 
@@ -138,21 +146,16 @@ let
           # must remain blocked.
           (final: prev: {
             hermes-agent = prev.hermes-agent.overrideAttrs (_old: {
+              src = pythonSrc;
               HERMES_NIX_BUILD = "1";
             });
           })
         ]
       );
 
-  # The editable venv points at the live checkout, so it uses an
-  # UNFILTERED workspace rooted at a real path — mkEditablePyprojectOverlay
-  # computes relative paths via lib.path.splitRoot, which rejects the
-  # filtered pythonSrc (a cleanSourceWith set, not a path).  Filtering
-  # buys nothing here anyway: the editable install reads from
-  # $HERMES_PYTHON_SRC_ROOT at runtime.
-  workspaceRoot = ./..;
-  editableWorkspace = uv2nix.lib.workspace.loadWorkspace { inherit workspaceRoot; };
-  editableOverlay = editableWorkspace.mkEditablePyprojectOverlay {
+  # Editable installs also use the real workspace path: splitRoot rejects a
+  # cleanSourceWith set, and the live payload is resolved through this variable.
+  editableOverlay = workspace.mkEditablePyprojectOverlay {
     root = "$HERMES_PYTHON_SRC_ROOT"; # resolved at shellHook time
   };
 

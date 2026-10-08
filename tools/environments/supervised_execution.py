@@ -83,7 +83,7 @@ def local_supervisor(binding: SupervisionBinding, env: dict) -> TargetJobSupervi
     bash = _find_bash()
     def execute(script, stdin=None):
         return subprocess.run([bash, "--noprofile", "--norc", "-c", script], input=stdin,
-                              env=env, capture_output=True, text=True, timeout=30)
+                              env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
     return SystemdJobSupervisor(execute, binding.state_dir)
 
 
@@ -93,7 +93,7 @@ def ssh_supervisor(binding: SupervisionBinding, env, values: dict) -> TargetJobS
     def execute(script, stdin=None):
         return subprocess.run(env._build_ssh_command(send_env=values) + [
             "bash --noprofile --norc -c " + shlex.quote(script)], input=stdin,
-            env=client_env_with(values), capture_output=True, text=True, timeout=30)
+            env=client_env_with(values), capture_output=True, text=True, encoding="utf-8", timeout=30)
     return SystemdJobSupervisor(execute, binding.state_dir)
 
 
@@ -116,7 +116,7 @@ for their cgroup. Transport loss keeps the handle live and the receipt intact.
         self.returncode = None
         self._done = threading.Event()
         read_fd, self._write_fd = os.pipe()
-        self.stdout = os.fdopen(read_fd, "r", encoding="utf-8", errors="replace")
+        self.stdout = os.fdopen(read_fd, "r", encoding="utf-8", errors="replace")  # windows-footgun: ok — live output preserves a leading U+FEFF.
         if binding := current_job_supervision():
             binding.handles.append(self)
         spawn_context_thread(target=self._drain, daemon=True,

@@ -214,6 +214,17 @@ contains pytest, the runner accepts the explicit `HERMES_PYTHON` above. It
 clears credentials, isolates `HERMES_HOME`, and runs each test file in a separate
 subprocess through `scripts/run_tests_parallel.py`. It does not use xdist.
 
+The Simit-owned test workflow is generated from `.simit/workflows/tests.yml.in`
+and `simit.toml`. Standard hosted fork runners execute four sequential native
+shards within the same per-file worker and deadline limits. One planning job
+freezes the runner's complete discovery into an exact-revision artifact; each
+shard verifies that the lists are nonempty, disjoint, and cover discovery before
+passing its list to `scripts/run_tests.sh --files-from`. Retained artifacts include
+the plan, selected files, execution revision, test log, and exit code. Failed and
+retried attempts keep separate evidence. E2E selections and logs are retained
+similarly. Reproduce a downloaded native shard from its recorded revision with
+`scripts/run_tests.sh --files-from shard-N.txt`.
+
 Run the relevant JS workspace checks for JS changes. Native install/update
 E2E runs on disposable CI hosts, never against the developer's live app.
 See [Package management](website/docs/reference/package-management.md) for PM commands and runtime ownership.

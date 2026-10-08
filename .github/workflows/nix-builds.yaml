@@ -3,6 +3,7 @@ name: Nix installable builds
 
 on:
   push:
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
 
@@ -22,12 +23,13 @@ jobs:
       max-parallel: 1
       matrix:
         installable:
+          - ".#minimal"
           - ".#checks.x86_64-linux.target-job-lifecycle"
     env:
       NIX_CONFIG: "log-lines = 3000"
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Prepare Nix build evidence
         env:
@@ -39,7 +41,7 @@ jobs:
           git rev-parse HEAD > "$SIMIT_NIX_BUILD_RESULTS/revision"
           printf '%s\n' "$INSTALLABLE" > "$SIMIT_NIX_BUILD_RESULTS/installable"
       - name: Install Nix
-        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -58,10 +60,16 @@ jobs:
           sudo chmod a+rw /dev/kvm
           test -r /dev/kvm && test -w /dev/kvm
       - name: Project setup 1
-        run: python3 scripts/test-qualify-job-lifecycle.py
+        run: printf '%s\n' 'NIX_CONFIG<<SIMIT_NIX_LIMITS' 'log-lines = 3000' 'max-jobs = 1' 'cores = 2' 'SIMIT_NIX_LIMITS' >> "$GITHUB_ENV"
 
       - name: Project setup 2
-        run: nix run github:caniko/simit/bbfef6f6674d9977d7504a0e9c66be39147d9400 -- init ci --platform github --ci-provider actions --runtime nix --check --diff
+        run: python3 tests/nix/check-cold-python-source.py
+
+      - name: Project setup 3
+        run: python3 scripts/test-qualify-job-lifecycle.py
+
+      - name: Project setup 4
+        run: nix run github:caniko/simit/b9775c5a8335bbb85ea4c2eac20db4ae7c7dad83 -- init ci --platform github --ci-provider actions --runtime nix --check --diff
 
       - name: Build ${{ matrix.installable }}
         env:
@@ -77,14 +85,14 @@ jobs:
           exit "$status"
       - name: Retain Nix results 1
         run: |
-          python3 scripts/qualify-job-lifecycle.py retain
+          if [ "$(cat "$SIMIT_NIX_BUILD_RESULTS/installable")" = '.#checks.x86_64-linux.target-job-lifecycle' ]; then python3 scripts/qualify-job-lifecycle.py retain; fi
       - name: Retain Nix diagnostics 1
         if: always()
         run: |
           python3 scripts/qualify-job-lifecycle.py retain-diagnostics
       - name: Upload Nix build evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
 
         with:
           name: nix-build-${{ strategy.job-index }}

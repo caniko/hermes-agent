@@ -647,7 +647,7 @@ def test_endpoint_identity_stable_across_supervisor_instances(tmp_path, monkeypa
     # The key is persisted, not per-process state.
     key_file = tmp_path / ".hermes" / "runtimes" / "llamacpp" / ".api_key"
     assert key_file.exists()
-    assert key_file.read_text(encoding="utf-8").strip() == first.api_key
+    assert key_file.read_text(encoding="utf-8-sig").strip() == first.api_key
 
 
 def test_llamacpp_endpoint_no_wait_when_not_enabled(tmp_path, monkeypatch):
@@ -915,11 +915,7 @@ def test_ensure_local_runtime_serializes_racing_callers(tmp_path, monkeypatch):
         def start(self, timeout_s=120):
             spawns.append(1)
             _time.sleep(0.3)  # widen the window the other caller races into
-            path = sup_mod.state_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({
-                "base_url": self.base_url, "api_key": self.api_key, "pid": os.getpid(),
-            }), encoding="utf-8")
+            _write_current_process_state(sup_mod.state_path(), base_url=self.base_url, api_key=self.api_key)
 
     monkeypatch.setattr(sup_mod, "LlamaServerSupervisor", _FakeSupervisor)
 
@@ -936,6 +932,8 @@ def test_ensure_local_runtime_serializes_racing_callers(tmp_path, monkeypatch):
     for t in threads:
         t.join(timeout=10)
 
+    assert all(not t.is_alive() for t in threads)
+    assert len(results) == 2
     assert len(spawns) == 1, (
         "both racing callers spawned a router instead of the second adopting the "
         "first's published state (#116682)")

@@ -231,6 +231,31 @@ def test_terminal_dispatch_keeps_supervised_background_descendants_owned(tmp_pat
 
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("backend", ["local", "ssh"])
+def test_supervisor_preserves_environment_names_used_by_boot_checks(tmp_path, target):
+    from tools.environments.job_supervision import JobState, SupervisionError
+    from tools.environments.systemd_jobs import SystemdJobSupervisor
+
+    def execute(script, stdin=None):
+        return target("export recorded_boot='caller recorded' current_boot='caller current'; " + script, stdin)
+
+    supervisor = SystemdJobSupervisor(execute, str(tmp_path / "state"))
+    supervisor.prepare()
+    try:
+        job = supervisor.start('printf "%s\\n" "$recorded_boot" "$current_boot"',
+                               cwd=str(tmp_path), environment_names=("PATH", "recorded_boot", "current_boot"))
+        wait_for(lambda: supervisor.inspect(job) is JobState.SETTLED)
+        assert supervisor.output(job) == "caller recorded\ncaller current\n"
+        # Isolating the comparison must not let a stale boot fence admit work.
+        (tmp_path / "state/fence/boot").write_text("stale boot\n", encoding="utf-8")
+        with pytest.raises(SupervisionError):
+            supervisor.start("touch should-not-exist", cwd=str(tmp_path), environment_names=("PATH",))
+        assert not (tmp_path / "should-not-exist").exists()
+    finally:
+        supervisor.stop()
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("backend", ["local", "ssh"])
 def test_supervisor_preserves_input_and_treats_lost_control_as_unknown(tmp_path, target):
     from tools.environments.job_supervision import JobState
     from tools.environments.systemd_jobs import SystemdJobSupervisor
