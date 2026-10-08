@@ -56,9 +56,7 @@ jobs:
           include-hidden-files: true
           path: |
             ${{ runner.temp }}/native-ci-generation/simit.toml
-            ${{ runner.temp }}/native-ci-generation/.github/workflows/nix-builds.yaml
-            ${{ runner.temp }}/native-ci-generation/.github/workflows/*.yml
-            ${{ runner.temp }}/native-ci-generation/.github/workflows/generate-native-ci.yaml
+            ${{ runner.temp }}/native-ci-generation/.github/workflows/**
             ${{ runner.temp }}/native-ci-generation/.simit/workflows/**
             ${{ runner.temp }}/native-ci-generation/source-revision
             ${{ runner.temp }}/native-ci-generation/source-config.sha256
