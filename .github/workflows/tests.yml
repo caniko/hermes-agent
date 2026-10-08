@@ -102,7 +102,6 @@ jobs:
           HERMES_TEST_SLICE: ${{ matrix.slice }}/2
           HERMES_TEST_WORKERS: 32
           HERMES_TEST_FILE_TIMEOUT: 600
-          HERMES_TEST_FILE_RETRIES: "0"
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
