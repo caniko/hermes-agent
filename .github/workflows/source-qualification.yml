@@ -9,6 +9,21 @@ concurrency:
   group: worker-source-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: false
 jobs:
+  qualification_helpers:
+    name: Qualification helper contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: python3 scripts/test-qualify-job-lifecycle.py
+        if: always()
+      - run: python3 scripts/test-qualification-evidence.py
+        if: always()
+      - run: python3 scripts/test-runner-readiness.py
+        if: always()
   admission:
     name: Admission evidence / ${{ matrix.mode }}
     runs-on: ubuntu-24.04
@@ -103,7 +118,9 @@ jobs:
           persist-credentials: false
       - name: Read supported provider controls before scheduling
         id: ready
-        run: python3 scripts/runner-readiness.py --memory-gb 64 --destination runner-readiness.json
+        # Preserve the 64 GiB MemTotal floor below. A nominal 64 GiB runner
+        # cannot meet it after kernel reservations; select the next larger size.
+        run: python3 scripts/runner-readiness.py --memory-gb 128 --destination runner-readiness.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -168,7 +185,7 @@ jobs:
 
   retention:
     name: Exact head / mandatory result and actual retention
-    needs: [admission, native, runner_readiness]
+    needs: [qualification_helpers, admission, native, runner_readiness]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -189,6 +206,7 @@ jobs:
           if-no-files-found: error
       - name: Require GREEN and retained audit
         run: |
+          test '${{ needs.qualification_helpers.result }}' = success
           test '${{ needs.admission.result }}' = success
           test '${{ needs.native.result }}' = success
           test '${{ needs.runner_readiness.result }}' = success

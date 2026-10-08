@@ -11,7 +11,7 @@ import subprocess
 import urllib.request
 import xml.etree.ElementTree as ET
 
-MIN_RETENTION_SECONDS = 2592000
+MIN_RETENTION_SECONDS = 31 * 24 * 60 * 60
 
 
 def require(condition, message):
@@ -71,7 +71,8 @@ def seal(directory, outcome, strict_reports):
         identities = [(case.get("classname"), case.get("name")) for case in cases]
         failures = root.findall(".//failure") + root.findall(".//error")
         skipped = root.findall(".//skipped")
-        retried = [node for node in root.iter() if "retry" in node.tag.lower() or "flaky" in node.tag.lower()]
+        retried = [node for node in root.iter()
+                   if any(marker in node.tag.lower() for marker in ("retry", "rerun", "flaky"))]
         if outcome == "success":
             if len(identities) != len(set(identities)):
                 rejected.append(f"Duplicate/retried JUnit cases: {path}")
@@ -90,25 +91,6 @@ def seal(directory, outcome, strict_reports):
                            for path in sorted(directory.rglob("*")) if path.is_file() and path.name != "receipt.json"}}
     (directory / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     require(not rejected, "; ".join(rejected))
-
-
-def expected_red(directory):
-    root = ET.parse(directory / "regression.xml").getroot()
-    cases = root.findall(".//testcase")
-    require(cases and not root.findall(".//skipped") and not root.findall(".//error"),
-            "Expected RED requires completed assertion failures, without errors or skips")
-    failed = [case.get("name", "") for case in cases if case.find("failure") is not None]
-    oracles = ["binds a delayed ID-less parent poll", "rejects a delayed parent SSE",
-               "holds live and recovery ownership", "stops and settles before returning"]
-    require(all(any(oracle in name for name in failed) for oracle in oracles),
-            f"Missing baseline regression failures: {failed}")
-    source_path = directory / "source.json"
-    source = json.loads(source_path.read_text(encoding="utf-8-sig"))
-    source.update({"baseline": "f6451f242d5cbb803e3c265e90f05b642e573203",
-                   "regression_fixture_sha256": sha256("packages/adapters/hermes/src/gateway/server/lineage-observation.test.ts"),
-                   "expected_assertion_failures": failed})
-    source_path.write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8")
-    seal(directory, "expected-red", True)
 
 
 def artifacts(prefix, count, destination):
@@ -148,8 +130,6 @@ def main():
     finish.add_argument("directory", type=Path)
     finish.add_argument("outcome")
     finish.add_argument("--strict-reports", action="store_true")
-    red = sub.add_parser("expected-red")
-    red.add_argument("directory", type=Path)
     audit = sub.add_parser("artifacts")
     audit.add_argument("prefix")
     audit.add_argument("count", type=int)
@@ -159,8 +139,6 @@ def main():
         initialize(args.directory)
     elif args.command == "seal":
         seal(args.directory, args.outcome, args.strict_reports)
-    elif args.command == "expected-red":
-        expected_red(args.directory)
     else:
         artifacts(args.prefix, args.count, args.destination)
 

@@ -3,14 +3,16 @@
 This source successor starts from worker
 `72433d338b79b97f0e8ebe1cfdacb0e1238ea655`. It adds an admission proof to the
 authenticated idempotent Stop endpoint. The proof hashes the normalized key and
-the original UTF-8 HTTP body and names the reserved root. A conflicting request
+the original HTTP body bytes, before charset decoding, and names the reserved root. A conflicting request
 or failed authentication cannot receive a proof.
 
 The hosted portable lane exercises ordinary and supervised admission before
 create, during admission, and after restart. The native lane retains all existing
 cases, deadlines, durable Stop fences, cgroup settlement, and source bindings.
-The receipt requires at least the accepted 176-case roster and has no mandatory
-failures, errors, skips, duplicate cases, or retries.
+The receipt requires all 183 classname/name identities in the immutable
+`tests/scripts/fixtures/job-lifecycle-roster.json`, while retaining the historical
+numeric floor of 176. No mandatory failures, errors, skips, duplicate cases, or
+retries are accepted. The final gate also requires the helper contracts to pass.
 
 The hosted repair restores the stdlib-only ownership request transport from
 `ce0101f122f57ca8ce4912e3113cc61da93a668b` and the checked nonempty boot-ID reads
@@ -34,7 +36,10 @@ Contributor checks compare the actual PR base and head, and receipt subprocesses
 decode explicit UTF-8. These repairs require fresh exact-head hosted results.
 
 High-memory qualification requires an organization-owned GitHub larger runner
-with at least 64 GiB. Set `QUALIFICATION_LARGER_RUNNER` to its configured name and
+advertised as Linux/x64 with at least 32 cores and nominal 128 GiB memory.
+The separate runtime `MemTotal` gate retains its 64 GiB usable-memory floor;
+kernel reservations mean a nominal 64 GiB runner cannot meet that floor.
+Set `QUALIFICATION_LARGER_RUNNER` to its configured name and
 provide `HOSTED_RUNNER_READ_TOKEN` with supported organization runner-read access.
 The readiness job reads provider state and repository access before scheduling.
 It records unavailable capacity as a failure. There is no local or smaller-runner
