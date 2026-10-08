@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.platforms("posix")
-@pytest.mark.parametrize("stale_tags", [False, True])
+@pytest.mark.parametrize("stale_tags", [False, True, "conflicting"])
 def test_upgrade_baseline_refreshes_release_tags(tmp_path, stale_tags):
     def git(directory, *args, input=None):
         return subprocess.check_output(["git", *args], cwd=directory, input=input,
@@ -39,6 +39,8 @@ def test_upgrade_baseline_refreshes_release_tags(tmp_path, stale_tags):
     if stale_tags:
         git(fork, "update-ref", "refs/tags/" + older, "HEAD~2")
         assert git(fork, "describe", "--tags", "--abbrev=0", "HEAD~1") == older
+    if stale_tags == "conflicting":
+        git(fork, "update-ref", "refs/tags/" + latest, "HEAD~2")
 
     workflow = yaml.safe_load((ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8"))
     step = next(step for step in workflow["jobs"]["e2e-upgrade"]["steps"]
@@ -48,4 +50,5 @@ def test_upgrade_baseline_refreshes_release_tags(tmp_path, stale_tags):
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines()[-1] == latest
+    assert git(fork, "rev-parse", "refs/tags/" + latest) == commits[1]
     assert git(fork, "describe", "--tags", "--abbrev=0", "HEAD~1") == latest
