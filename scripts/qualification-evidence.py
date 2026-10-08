@@ -11,7 +11,7 @@ import subprocess
 import urllib.request
 import xml.etree.ElementTree as ET
 
-MIN_RETENTION_SECONDS = 2592000
+MIN_RETENTION_SECONDS = 31 * 24 * 60 * 60
 
 
 def require(condition, message):
