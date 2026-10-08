@@ -2540,6 +2540,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @_require_auth
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — the stable, machine-readable API surface for external UIs."""
+        from gateway.platforms.api_server_executor_admission import executor_admission
+
         return web.json_response({
             "object": "hermes.api_server.capabilities", "platform": "hermes-agent",
             "model": self._model_name,
@@ -2555,6 +2557,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "responses_api": True, "responses_streaming": True, "run_submission": True,
                 "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
                 "runs_recovery": _api_runs._recovery_capabilities(self),
+                "runs_executor_admission": executor_admission(self, api=sys.modules[__name__]),
                 "runs_execution_context": {
                     "version": 1, "backends": ["local", "ssh"], "mode": "precondition",
                     "lifetimes": ["wait_for_jobs"],

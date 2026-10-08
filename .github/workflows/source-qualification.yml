@@ -71,6 +71,11 @@ jobs:
           assert not root.findall('.//error') and not root.findall('.//skipped')
           PY
           fi
+      - name: Run live executor admission assertions once
+        if: matrix.mode == 'green'
+        run: |
+          set -euo pipefail
+          scripts/run_tests.sh tests/gateway/test_api_server_executor_admission.py --junitxml="$EVIDENCE/executor-admission.xml" -o addopts= 2>&1 | tee "$EVIDENCE/executor-admission.log"
       - name: Seal original evidence
         if: always()
         run: python3 scripts/qualification-evidence.py seal "$EVIDENCE" '${{ matrix.mode == 'baseline-red' && job.status == 'success' && 'expected-red' || job.status }}' --strict-reports
