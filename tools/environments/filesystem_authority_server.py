@@ -104,7 +104,9 @@ class AuthorityServer(socketserver.ThreadingUnixStreamServer):
             super().__init__(pinned, AuthorityHandler)
             os.chmod(pinned, 0o660)
         except BaseException:
-            if self._parent_fd is not None:
+            if hasattr(self, "socket"):
+                self.server_close()
+            elif self._parent_fd is not None:
                 os.close(self._parent_fd)
                 self._parent_fd = None
             raise
