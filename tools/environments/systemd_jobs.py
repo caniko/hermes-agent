@@ -81,8 +81,10 @@ class SystemdJobSupervisor:
               job_id: str | None = None) -> JobReceipt:
         if not posixpath.isabs(cwd) or "\0" in cwd:
             raise ValueError("job cwd must be absolute")
-        if any(not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", name) for name in environment_names):
-            raise ValueError("invalid environment name")
+        # Inherited Linux environments can contain Bash-exported function keys,
+        # which cannot be reproduced with a Bash variable declaration.
+        environment_names = tuple(name for name in environment_names
+                                  if re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", name))
         job = JobReceipt(job_id or uuid.uuid4().hex)
         folder, unit = self._job(job)
         root, dest = shlex.quote(self.state_dir), shlex.quote(folder)
