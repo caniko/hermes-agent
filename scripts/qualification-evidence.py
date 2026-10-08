@@ -94,31 +94,40 @@ def seal(directory, outcome, strict_reports):
 
 
 def artifacts(prefix, count, destination):
-    source = identity()
-    retained = []
-    page = 1
-    while True:
-        response = api(f"actions/runs/{source['run_id']}/artifacts?per_page=100&page={page}")
-        for artifact in response["artifacts"]:
-            if not artifact["name"].startswith(prefix):
-                continue
-            created = dt.datetime.fromisoformat(artifact["created_at"].replace("Z", "+00:00"))
-            expiry = dt.datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00"))
-            lifetime = (expiry - created).total_seconds()
-            require(not artifact["expired"] and lifetime >= MIN_RETENTION_SECONDS,
-                    f"Artifact {artifact['id']} lifetime is only {lifetime} seconds")
-            digest = artifact.get("digest", "")
-            require(digest.startswith("sha256:") and len(digest) == 71, "Provider artifact SHA-256 is missing")
-            require(artifact["workflow_run"]["head_sha"] == source["head"], "Artifact workflow source mismatch")
-            retained.append({"id": artifact["id"], "name": artifact["name"], "sha256": digest,
-                             "created_at": artifact["created_at"], "expires_at": artifact["expires_at"],
-                             "retention_seconds": lifetime})
-        if len(response["artifacts"]) < 100:
-            break
-        page += 1
-    require(len(retained) == count, f"Expected {count} required artifacts, found {len(retained)}")
-    receipt = {"schema": "hosted-retention.v1", **source, "qualified": False, "artifacts": retained}
-    Path(destination).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    receipt = {"schema": "hosted-retention.v1", "qualified": False,
+               "artifacts": [], "rejected": []}
+    try:
+        receipt.update(identity())
+        page = 1
+        while True:
+            response = api(f"actions/runs/{receipt['run_id']}/artifacts?per_page=100&page={page}")
+            for artifact in response["artifacts"]:
+                if not artifact["name"].startswith(prefix):
+                    continue
+                created = dt.datetime.fromisoformat(artifact["created_at"].replace("Z", "+00:00"))
+                expiry = dt.datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00"))
+                lifetime = (expiry - created).total_seconds()
+                digest = artifact.get("digest", "")
+                receipt["artifacts"].append({
+                    "id": artifact["id"], "name": artifact["name"], "sha256": digest,
+                    "created_at": artifact["created_at"], "expires_at": artifact["expires_at"],
+                    "retention_seconds": lifetime, "expired": artifact["expired"],
+                    "workflow_run": artifact.get("workflow_run"),
+                })
+                require(not artifact["expired"] and lifetime >= MIN_RETENTION_SECONDS,
+                        f"Artifact {artifact['id']} lifetime is only {lifetime} seconds")
+                require(digest.startswith("sha256:") and len(digest) == 71, "Provider artifact SHA-256 is missing")
+                require(artifact["workflow_run"]["head_sha"] == receipt["head"], "Artifact workflow source mismatch")
+            if len(response["artifacts"]) < 100:
+                break
+            page += 1
+        require(len(receipt["artifacts"]) == count,
+                f"Expected {count} required artifacts, found {len(receipt['artifacts'])}")
+    except Exception as error:
+        receipt["rejected"].append(f"{type(error).__name__}: {error}")
+        raise
+    finally:
+        Path(destination).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
 
 
 def main():

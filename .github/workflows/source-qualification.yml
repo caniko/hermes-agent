@@ -99,7 +99,7 @@ jobs:
         with:
           name: worker-proof-admission-${{ matrix.mode }}-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/qualification/
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: error
 
   runner_readiness:
@@ -126,7 +126,7 @@ jobs:
         with:
           name: worker-proof-readiness-${{ github.event.pull_request.head.sha }}
           path: runner-readiness.json
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: error
 
   native:
@@ -180,7 +180,7 @@ jobs:
         with:
           name: worker-proof-native-${{ matrix.memory }}-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/qualification/
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: error
 
   retention:
@@ -202,7 +202,7 @@ jobs:
         with:
           name: worker-retention-${{ github.event.pull_request.head.sha }}
           path: retention.json
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: error
       - name: Require GREEN and retained audit
         run: |
