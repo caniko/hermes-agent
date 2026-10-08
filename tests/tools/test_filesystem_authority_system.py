@@ -121,7 +121,9 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
         )
         def client(uid):
             def call(payload):
-                return subprocess.run([sys.executable, "-c", script, socket_path], input=payload,
+                # Controllers need a traversable interpreter independently of
+                # the authority's private virtualenv. Only the guardian uses it.
+                return subprocess.run([sys._base_executable, "-c", script, socket_path], input=payload,
                     env=env, text=True, capture_output=True, timeout=40,
                     user=uid, group=workload.pw_gid, extra_groups=[])
             return call
@@ -229,10 +231,12 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
                     b.start("touch late", cwd=str(maintained), environment_names=())
                 assert not (maintained / "late").exists()
             finally:
-                for owned in (a, b, other):
-                    owned.stop()
-                    assert owned.settled()
-                    assert owned.release()["state"] == "settled"
-                server.shutdown()
-                thread.join()
-                authority.close()
+                try:
+                    for owned in (a, b, other):
+                        owned.stop()
+                        assert owned.settled()
+                        assert owned.release()["state"] == "settled"
+                finally:
+                    server.shutdown()
+                    thread.join()
+                    authority.close()
