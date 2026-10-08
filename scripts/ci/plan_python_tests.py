@@ -92,7 +92,13 @@ def merge_durations(
     merged = {}
     for shard in plan["shards"]:
         selected = verify_plan(root, directory, shard["index"], revision)
-        artifact = results / f"native-tests-{shard['index']}-attempt-{attempt}"
+        # Failed-job reruns retain successful shards from earlier attempts.
+        for number in range(attempt, 0, -1):
+            artifact = results / f"native-tests-{shard['index']}-attempt-{number}"
+            if artifact.is_dir():
+                break
+        else:
+            raise FileNotFoundError("no shard artifact from this or a prior attempt")
         if (artifact / "revision").read_text(encoding="utf-8-sig").strip() != revision:
             raise ValueError("duration artifact source does not match execution")
         if (

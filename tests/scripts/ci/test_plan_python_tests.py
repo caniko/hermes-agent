@@ -111,7 +111,7 @@ def test_duration_cache_merges_only_each_shards_owned_measurements(tmp_path):
         assert json.loads((root / "test_durations.json").read_text()) == expected
         path.write_bytes(original)
     with pytest.raises(FileNotFoundError):
-        plan_python_tests.merge_durations(root, output, results, 3, revision)
+        plan_python_tests.merge_durations(root, output, results, 1, revision)
     assert json.loads((root / "test_durations.json").read_text()) == expected
     # Re-running only failed jobs keeps a successful shard's prior artifact.
     earlier = results / "native-tests-1-attempt-1"
