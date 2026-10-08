@@ -22,6 +22,8 @@ jobs:
         if: always()
       - run: python3 scripts/test-qualification-evidence.py
         if: always()
+      - run: python3 scripts/test-runner-readiness.py
+        if: always()
   admission:
     name: Admission evidence / ${{ matrix.mode }}
     runs-on: ubuntu-24.04
