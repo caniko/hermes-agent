@@ -19,6 +19,7 @@ import sys
 import threading
 from pathlib import Path
 
+from hermes_platform.host.facts import os_family
 from tools.environments.filesystem_authority import FilesystemAuthority
 from tools.environments.filesystem_claims import ClaimStore
 
@@ -41,7 +42,7 @@ def socket_parent(socket_path):
     if not path.is_absolute() or ".." in path.parts:
         raise PermissionError("authority socket requires an absolute protected path")
     getuid = getattr(os, "geteuid", None)
-    if getuid is None:
+    if os_family() != "linux" or getuid is None:
         raise RuntimeError("filesystem authority sockets require Linux")
     owner = getuid()
     fd = os.open("/", os.O_PATH | os.O_DIRECTORY)
