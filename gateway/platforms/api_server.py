@@ -2523,6 +2523,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @_require_auth
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — the stable, machine-readable API surface for external UIs."""
+        from hermes_platform.host import facts
+        from tools.terminal_tool import _get_env_config
+
+        backend = _get_env_config()["env_type"]
         return web.json_response({
             "object": "hermes.api_server.capabilities", "platform": "hermes-agent",
             "model": self._model_name,
@@ -2539,7 +2543,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
                 "runs_execution_context": {
                     "version": 1, "backends": ["local", "ssh"], "mode": "precondition",
-                    "lifetimes": ["wait_for_jobs"],
+                    "lifetimes": ["wait_for_jobs"] if backend == "ssh" or (
+                        backend == "local" and facts.os_family() == "linux") else [],
                     "stop_admission": True,
                     "filesystem_ownership": {"version": 1, "early_intent": True, "target_authority": True,
                                              "controller_release": True},
