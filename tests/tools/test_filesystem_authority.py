@@ -269,7 +269,8 @@ def test_stop_fences_admitted_intent_even_when_no_exit_receipt_exists(tmp_path, 
     message = {"version": 1, "authority": authority.store.authority_id, "principal": "controller",
                "request": "attempt", "fingerprint": "fp"}
     job = uuid.uuid4().hex
-    command = {"job": job, "cwd": str(root), "environment": {}, "command": "touch entered; sleep 300; touch late"}
+    command = {"job": job, "cwd": str(root), "environment": {"PATH": os.environ["PATH"]},
+               "command": "touch entered; sleep 300; touch late"}
     def call(op, **fields):
         return authority.dispatch(os.getuid(), {**message, "op": op, **fields})
     try:
