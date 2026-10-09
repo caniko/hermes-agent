@@ -121,6 +121,12 @@ def seal(directory, outcome, strict_reports):
 
 def artifacts(prefix, count, destination):
     source = identity()
+    required_names = {
+        "worker-proof-": {f"worker-proof-{kind}-{source['head']}" for kind in (
+            "admission-green", "admission-baseline-red", "readiness", "native-ordinary", "native-high-memory")},
+        "worker-retention-": {f"worker-retention-{source['head']}"},
+    }
+    require(prefix in required_names and count == len(required_names[prefix]), "Unknown artifact identity contract")
     retained = []
     page = 1
     while True:
@@ -143,6 +149,8 @@ def artifacts(prefix, count, destination):
             break
         page += 1
     require(len(retained) == count, f"Expected {count} required artifacts, found {len(retained)}")
+    require({artifact["name"] for artifact in retained} == required_names[prefix],
+            "Required artifact identities do not match this source")
     receipt = {"schema": "hosted-retention.v1", **source, "qualified": False, "artifacts": retained}
     Path(destination).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
 

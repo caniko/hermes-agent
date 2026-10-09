@@ -15,6 +15,26 @@ spec.loader.exec_module(evidence)
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_retention_requires_each_named_proof_not_an_equal_sized_substitute(self):
+        head = "a" * 40
+        suffixes = ("admission-green", "admission-baseline-red", "readiness", "native-ordinary", "native-high-memory")
+        names = [f"worker-proof-{suffix}-{head}" for suffix in suffixes]
+        def artifact(index, name):
+            return {"id": index, "name": name, "expired": False,
+                    "created_at": "2026-10-09T00:00:00Z", "expires_at": "2026-11-10T00:00:00Z",
+                    "digest": "sha256:" + "b" * 64, "workflow_run": {"head_sha": head}}
+        with tempfile.TemporaryDirectory() as location:
+            for replacements in (names, names[:-1] + [f"worker-proof-diagnostics-{head}"]):
+                with self.subTest(names=replacements), patch.object(evidence, "identity", return_value={"head": head, "run_id": 1}), \
+                        patch.object(evidence, "api", return_value={"artifacts": [artifact(i, name) for i, name in enumerate(replacements)]}):
+                    destination = Path(location) / "retention.json"
+                    if replacements == names:
+                        evidence.artifacts("worker-proof-", 5, destination)
+                        self.assertEqual({a["name"] for a in json.loads(destination.read_text(encoding="utf-8-sig"))["artifacts"]}, set(names))
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "identities"):
+                            evidence.artifacts("worker-proof-", 5, destination)
+
     def report(self, directory, tag=None):
         (directory / "source.json").write_text(json.dumps({"head": "a" * 40}), encoding="utf-8")
         suite = ET.Element("testsuite")
