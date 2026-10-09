@@ -52,13 +52,13 @@ class EvidenceTests(unittest.TestCase):
                         self.assertFalse(directory.exists())
                     else:
                         evidence.initialize(directory)
-                        self.assertEqual(json.loads((directory / "source.json").read_text())["head"], "a" * 40)
+                        self.assertEqual(json.loads((directory / "source.json").read_text(encoding="utf-8-sig"))["head"], "a" * 40)
 
     def test_identity_rejects_later_runs_of_the_same_pr_head(self):
         with tempfile.TemporaryDirectory() as location:
             event = Path(location) / "event.json"
             event.write_text(json.dumps({"pull_request": {
-                "number": 4, "head": {"sha": "a" * 40}, "base": {"sha": "b" * 40}}}))
+                "number": 4, "head": {"sha": "a" * 40}, "base": {"sha": "b" * 40}}}), encoding="utf-8")
             environment = {"GITHUB_EVENT_PATH": str(event), "GITHUB_EVENT_NAME": "pull_request",
                            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "200",
                            "GITHUB_REPOSITORY": "owner/repo", "GITHUB_WORKFLOW_REF": "workflow@ref",
@@ -92,7 +92,7 @@ class EvidenceTests(unittest.TestCase):
     def test_identity_rejects_retry_attempts_before_querying_run_history(self):
         with tempfile.TemporaryDirectory() as location:
             event = Path(location) / "event.json"
-            event.write_text(json.dumps({"pull_request": {"number": 4, "head": {"sha": "a" * 40}}}))
+            event.write_text(json.dumps({"pull_request": {"number": 4, "head": {"sha": "a" * 40}}}), encoding="utf-8")
             with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event),
                                          "GITHUB_EVENT_NAME": "pull_request", "GITHUB_RUN_ATTEMPT": "2"}), patch.object(
                 evidence, "api", return_value={"head": {"sha": "a" * 40}}
