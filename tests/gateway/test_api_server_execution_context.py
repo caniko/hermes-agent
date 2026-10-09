@@ -94,6 +94,20 @@ async def test_idempotency_follows_served_home_across_multiplex_and_standalone_r
                     assert response.headers["Idempotency-Replayed"] == "true"
                 run_ids[name] = run_id
                 await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 10)
+            # An ordinary run has no ownership contract: changing enrollment
+            # must not create a second execution for the same admission key.
+            for authority in ("enrolled-a", "enrolled-b", None):
+                config = f"terminal:\n  backend: local\n  cwd: {homes['a']}\n"
+                if authority:
+                    config += (f"  filesystem_authority:\n    authority: {authority}\n"
+                               "    principal: controller\n    socket: /unused-authority\n    command: ['false']\n")
+                (homes["a"] / "config.yaml").write_text(config, encoding="utf-8")
+                replay = await client.post("/v1/runs", headers={**headers, "Test-Profile": "a"}, json={"input": "work"})
+                await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 10)
+                assert replay.status == 202, await replay.text()
+                assert (await replay.json())["run_id"] == run_ids["a"]
+                assert replay.headers["Idempotency-Replayed"] == "true"
+                assert executed == [hermes_home_key(homes["a"]), hermes_home_key(homes["b"])]
         assert run_ids["a"] != run_ids["b"]
         assert executed == [hermes_home_key(homes["a"]), hermes_home_key(homes["b"])]
         with profile_scope(homes["b"]):
@@ -205,6 +219,24 @@ async def test_runs_check_and_pin_the_served_target(tmp_path, monkeypatch, backe
                     assert response.status in (400, 409), await response.text()
                 before = len(observed)
                 payload = {"input": "work", "execution_context": context}
+                if backend == "local":
+                    from hermes_platform.host import facts
+
+                    statuses, lifetimes = [], []
+                    prior_runs = set(adapter._run_statuses)
+                    for family in ("darwin", "win32"):
+                        with monkeypatch.context() as platform_patch:
+                            platform_patch.setattr(facts, "os_family", lambda _family=family: _family)
+                            unsupported = await client.post("/v1/runs", headers={**headers, "Idempotency-Key": family},
+                                json={**payload, "execution_context": {**context, "lifetime": "wait_for_jobs"}})
+                            statuses.append(unsupported.status)
+                            capability = await (await client.get("/v1/capabilities", headers=headers)).json()
+                            lifetimes.append(capability["features"]["runs_execution_context"]["lifetimes"])
+                            await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 10)
+                    assert statuses == [400, 400], statuses
+                    assert all("wait_for_jobs" not in supported for supported in lifetimes), lifetimes
+                    assert set(adapter._run_statuses) == prior_runs
+                    assert len(observed) == before
                 original_config = (home / "config.yaml").read_text()
                 run_headers = {**headers, "Test-Change-Config": "1", "Idempotency-Key": f"{name}-{before}"}
                 unauthorized = await client.post("/v1/runs", headers={"Test-Profile": name}, json=payload)

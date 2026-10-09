@@ -175,6 +175,20 @@ async def test_two_gateways_park_before_tools_and_keep_key_rotation_identity(tmp
                     assert time.monotonic() < deadline
                     await asyncio.sleep(.05)
                 assert not called
+                # A fresh SQLite connection must see recovery intent while the
+                # authority still parks this run, not only after prepare succeeds.
+                from gateway.platforms.api_server_runs import _close_run_state, _run_idempotency_store_for
+
+                with profile_scope(tmp_path / "b"):
+                    restarted = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "b"}))
+                    try:
+                        persisted = _run_idempotency_store_for(restarted).status_for_run(adapters[1]._run_owners[bid], bid)
+                        assert persisted["status"]["status"] == "queued", persisted
+                        assert persisted["status"]["supervision_ready"] is True, persisted
+                        assert persisted["status"]["last_event"] == "run.waiting_for_ownership", persisted
+                        assert persisted["status"]["supervision"]["profile_home"] == hermes_home_key(tmp_path / "b")
+                    finally:
+                        _close_run_state(restarted)
                 a = await clients[0].post("/v1/runs", headers=headers[0], json={"input": "work", "execution_context": contexts[0]})
                 assert a.status == 202, await a.text()
                 aid = (await a.json())["run_id"]
