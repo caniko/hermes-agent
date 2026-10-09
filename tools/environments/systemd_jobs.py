@@ -12,6 +12,7 @@ import re
 import shlex
 import subprocess
 import sys
+import sysconfig
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -95,11 +96,28 @@ class SystemdJobSupervisor:
         # RemainAfterExit retains successful receipts until explicit stop; ExitType
         # keeps the job running when only daemonized descendants remain (systemd 250+).
         guardian = self.execution_user is not None and "PrivatePIDs=yes" in self.properties
+        guardian_python = str(Path(sys._base_executable).resolve(strict=True)) if guardian else None
         properties = ["ExitType=cgroup", "RemainAfterExit=yes", "KillMode=mixed", "TimeoutStopSec=5s",
                       "StandardOutput=append:" + folder + "/output",
                       "StandardError=append:" + folder + "/foreground-exit" if guardian else "StandardError=inherit",
                       "StandardInput=file:" + folder + "/input"]
         properties.extend(self.properties)
+        if guardian:
+            # Use the trusted base interpreter, never a host-only virtualenv.
+            # Expose only its executable/stdlib/shared library, not its enclosing
+            # installation prefix or home. Workload env is loaded after PID1.
+            runtime_paths = {guardian_python, sysconfig.get_path("stdlib"),
+                             sysconfig.get_path("platstdlib")}
+            if sysconfig.get_config_var("Py_ENABLE_SHARED"):
+                for variable in ("LDLIBRARY", "INSTSONAME"):
+                    name = sysconfig.get_config_var(variable)
+                    if name:
+                        runtime_paths.add(str(Path(sysconfig.get_config_var("LIBDIR")) / name))
+            for path in sorted(runtime_paths):
+                source_path = str(Path(path).resolve(strict=True))
+                if any(character in source_path + path for character in (":", "\n")):
+                    raise ValueError("guardian runtime path cannot contain colon or newline")
+                properties += [f"BindReadOnlyPaths={quote_systemd_path(source_path)}:{quote_systemd_path(path)}"]
         fence = self.state_dir + "/fence"
         if self.execution_user is not None:
             if ":" in fence or "\n" in fence:
@@ -144,7 +162,7 @@ class SystemdJobSupervisor:
             f"{environment_script} > {dest}/environment; "
             f"{shlex.join(argv)} -- \"$(command -v bash)\" --noprofile --norc -ec "
             + shlex.quote('exec "$1" -i ' + (
-                shlex.join([sys.executable, "-I", "-S", "-c",
+                shlex.join([guardian_python, "-I", "-S", "-c",
                             Path(__file__).with_name("systemd_job_init.py").read_text(encoding="utf-8-sig")]) + " "
                 if guardian else "")
                 + '"$2" --noprofile --norc -ec "$3" job "$2" "${CREDENTIALS_DIRECTORY:-}" "$4" "$5" "$6"')

@@ -21,6 +21,9 @@ from tests.tools.test_target_job_supervision import wait_for
 @pytest.mark.parametrize("backend", ["local"])
 def test_systemd_mount_properties_reach_manager_with_exact_paths(tmp_path, target):
     import json
+    import sys
+    import sysconfig
+    from pathlib import Path
     from tools.environments.job_supervision import JobReceipt
 
     base = tmp_path / 'worker %t "state" \\ '
@@ -82,6 +85,11 @@ def test_systemd_mount_properties_reach_manager_with_exact_paths(tmp_path, targe
         assert property_value("ProtectHome") == "tmpfs"
         assert any(source == str(state / row["id"] / "fence") and destination == "/run/hermes-job-fence"
                    for source, destination, *_ in property_value("BindReadOnlyPaths"))
+        readonly = property_value("BindReadOnlyPaths")
+        executable = str(Path(sys._base_executable).resolve(strict=True))
+        for path in (executable, sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib")):
+            assert any(source == str(Path(path).resolve(strict=True)) and destination == path
+                       for source, destination, *_ in readonly)
     finally:
         call("stop")
         assert call("release")["state"] == "settled"

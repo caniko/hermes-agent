@@ -122,7 +122,7 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
         def client(uid):
             def call(payload):
                 # Controllers need a traversable interpreter independently of
-                # the authority's private virtualenv. Only the guardian uses it.
+                # the authority's private virtualenv.
                 return subprocess.run([sys._base_executable, "-c", script, socket_path], input=payload,
                     env=env, text=True, capture_output=True, timeout=40,
                     user=uid, group=workload.pw_gid, extra_groups=[])
@@ -146,6 +146,9 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
                     'printf cached > "$CARGO_TARGET_DIR/artifact"', cwd=str(maintained), environment_names=())
                 wait_for(lambda: a.main_exit_code(job) is not None)
                 assert a.exit_code(job) == 0, a.output(job)
+                # The foreground receipt can precede PID1's final orphan reap
+                # and manager cgroup settlement. Neither substitutes for the other.
+                wait_for(lambda: a.inspect(job) is JobState.SETTLED)
                 assert a.inspect(job) is JobState.SETTLED
                 assert (maintained / "maintained").stat().st_uid == workload.pw_uid
                 assert (maintained / "maintained").stat().st_gid == workload.pw_gid
