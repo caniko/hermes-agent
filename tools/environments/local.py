@@ -943,13 +943,13 @@ class LocalEnvironment(BaseEnvironment):
         if login:
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
+        self._recover_cwd()
         if binding := current_job_supervision():
             run_env = _make_run_env(self.env)
             supervisor = local_supervisor(binding, run_env)
             job = supervisor.start(shlex.join(args), cwd=self.cwd,
                                    environment_names=tuple(run_env), stdin=stdin_data)
             return SupervisedProcessHandle(supervisor, job, wait_for_descendants=wait_for_descendants)
-        self._recover_cwd()
         proc = subprocess.Popen(
             args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

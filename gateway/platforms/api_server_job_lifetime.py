@@ -21,7 +21,8 @@ def supervision_record(context, run_id: str) -> dict:
     from tools.terminal_tool import _get_env_config
 
     if "ownership" in context.requested:
-        return {"provider": "filesystem_authority", "ownership": context.requested["ownership"]}
+        return {"provider": "filesystem_authority", "ownership": context.requested["ownership"],
+                "profile_home": context.profile_home}
     home = (str(get_hermes_home()) if context.requested["backend"] == "local"
             else _get_env_config()["ssh_hermes_home"])
     return {"provider": "systemd", "state_dir": posixpath.join(home, "run-jobs", run_id)}
@@ -74,7 +75,8 @@ def create_job_lifetime(context, record: dict) -> RunJobLifetime:
     if record["provider"] == "filesystem_authority":
         from gateway.platforms.api_server_filesystem_ownership import ownership_supervisor
 
-        if record["ownership"] != context.requested.get("ownership"):
+        if (record["ownership"] != context.requested.get("ownership")
+                or not record.get("profile_home") or record["profile_home"] != context.profile_home):
             raise SupervisionError("filesystem ownership recovery identity mismatch")
         supervisor, transport = ownership_supervisor(context)
         return RunJobLifetime(SupervisionBinding("", supervisor=supervisor), supervisor, transport)

@@ -33,6 +33,8 @@ def worker_authority(config):
 
 
 def ownership_supervisor(context):
+    from hermes_constants import hermes_home_key
+    from tools.environments.filesystem_authority import fingerprint
     from tools.environments.filesystem_supervisor import FilesystemSupervisor
     from tools.environments.local import _make_run_env
     from tools.environments.remote_common import client_env_with
@@ -44,6 +46,12 @@ def ownership_supervisor(context):
     descriptor = context.requested["ownership"]
     if policy is None or any(policy[key] != descriptor[key] for key in ("authority", "principal")):
         raise ExecutionContextError("filesystem ownership does not match worker enrollment")
+    if context.profile_home is None or context.profile_home != hermes_home_key():
+        raise ExecutionContextError("filesystem ownership requires its admitted profile scope")
+    # The authenticated profile scope, not a client-supplied name or rotated
+    # bearer token, qualifies every operation issued by this supervisor.
+    descriptor = {**descriptor, **{key: "profile-v1-" + fingerprint({
+        "profile": context.profile_home, key: descriptor[key]}) for key in ("request", "fingerprint")}}
     command = policy["command"] + ["request", "--socket", policy["socket"]]
     transport = None
     if context.requested["backend"] == "local":

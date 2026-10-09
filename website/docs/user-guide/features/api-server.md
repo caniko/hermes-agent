@@ -522,6 +522,11 @@ and `systemd-run --expand-environment=no`. The supervisor interface separates
 job ownership from the local/SSH transport so other supervisors can implement the
 same contract.
 
+If a direct supervised tool submission loses its acknowledgement, admission is
+sealed before returning an error: the same run cannot retry under a fresh job
+identity. Its durable job intent remains owned and reconnectable until target
+settlement is proven, even when the sealing acknowledgement is also lost.
+
 Foreground terminal calls return when their shell exits. Background terminal
 completion and the API run remain live while descendants (including detached
 processes with closed output streams) are running. Delegated workers remain owned
@@ -533,6 +538,15 @@ later run.
 With filesystem ownership enabled, kernel code and RPC files use the claim's
 private execution-host runtime directory. Authority control state stays outside
 the workload's filesystem namespace.
+
+Ownership request and fingerprint identities are internally qualified by the
+authenticated profile's canonical home key, captured at admission. Identical
+client identities in another profile cannot reserve, start, inspect, stop or
+release the first profile's claim; API key rotation does not change that scope.
+Durable recovery also checks the recorded profile home. Before upgrading from
+unqualified ownership receipts, explicitly drain and release their claims with
+the enrolled authority controller; legacy receipts without profile provenance
+are not automatically adopted by any profile.
 
 Stop, cancellation, and failed turns fence new launches and terminate admitted
 jobs before publishing a terminal state. A `stopping` acknowledgement only

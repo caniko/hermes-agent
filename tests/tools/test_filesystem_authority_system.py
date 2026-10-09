@@ -41,11 +41,15 @@ def test_system_provider_launches_guardian_from_copied_virtualenv(tmp_path):
     interpreter = runtime / "bin/python"
     assert not interpreter.is_symlink()
     assert interpreter.resolve().is_relative_to(tmp_path)
+    sentinel = next(runtime.glob("lib/python*/site-packages")) / "private-guardian-sentinel"
+    sentinel.write_text("active virtualenv must not enter the worker root")
+    sentinel.chmod(0o644)  # Namespace isolation, not file permissions, must hide it.
     # Keep imports tied to the built candidate, not the editable source. The
     # authority actually runs from a copied, non-standard interpreter path.
     script = (f"import sys; sys.path[:] = {sys.path!r}; "
               "from tests.tools.test_filesystem_authority_system import "
-              "test_system_provider_preserves_uid_and_confines_same_uid_workers as check; check()")
+              "test_system_provider_preserves_uid_and_confines_same_uid_workers as check; "
+              f"check(runtime_sentinel={str(sentinel)!r})")
     result = subprocess.run([str(interpreter), "-c", script], capture_output=True, text=True,
                             timeout=180)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -84,11 +88,13 @@ def test_authority_client_rejects_foreign_server_before_sending_payload(tmp_path
 
 @pytest.mark.platforms("linux")
 @pytest.mark.skipif(os.geteuid() != 0, reason="requires explicit operator authorization for the system provider")
-def test_system_provider_preserves_uid_and_confines_same_uid_workers():
+def test_system_provider_preserves_uid_and_confines_same_uid_workers(runtime_sentinel=None):
     from tools.environments.local import build_subprocess_env
 
     workload = pwd.getpwnam("nobody")
     env = build_subprocess_env()
+    if runtime_sentinel is not None:
+        assert Path(runtime_sentinel).read_text() == "active virtualenv must not enter the worker root"
     with tempfile.TemporaryDirectory(prefix="hermes-system-provider-") as directory:
         base = Path(directory)
         base.chmod(0o711)
@@ -154,14 +160,19 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
                 assert (maintained / "maintained").stat().st_gid == workload.pw_gid
                 assert a.output(job) == a.runtime_dir + "/home"
                 assert not (maintained / ".hermes").exists()
-                probe = a.start(f"! cat -- /proc/1/fd/2 && ! cat -- {shlex.quote(str(sibling))} "
-                    f"&& ! cat -- {shlex.quote(str(credentials))} && printf scoped",
+                probe_command = (f"! cat -- /proc/1/fd/2 && ! cat -- {shlex.quote(str(sibling))} "
+                                 f"&& ! cat -- {shlex.quote(str(credentials))}")
+                if runtime_sentinel is not None:
+                    probe_command += f" && ! cat -- {shlex.quote(runtime_sentinel)}"
+                probe = a.start(probe_command + " && printf scoped",
                     cwd=str(maintained), environment_names=())
                 wait_for(lambda: a.main_exit_code(probe) is not None)
                 assert a.exit_code(probe) == 0, a.output(probe)
                 other.prepare()
                 forbidden = [a.runtime_dir + "/home/private", str(state / "claims.sqlite"),
-                             str(maintained / "maintained"), str(credentials)]
+                              str(maintained / "maintained"), str(credentials)]
+                if runtime_sentinel is not None:
+                    forbidden.append(runtime_sentinel)
                 command = " && ".join(f"! cat -- {shlex.quote(path)}" for path in forbidden)
                 command += f" && ! touch -- {shlex.quote(str(roots[0] / 'ungranted'))} && printf isolated"
                 isolated = other.start(command, cwd=str(roots[1]), environment_names=())

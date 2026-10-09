@@ -107,6 +107,31 @@ def test_supervisor_waits_for_daemon_and_recovers_stop_fence(tmp_path, target):
 
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("backend", ["local"])
+def test_supervised_local_recovers_deleted_cwd_before_submission(tmp_path, target):
+    from tools.environments.local import LocalEnvironment
+    from tools.environments.supervised_execution import SupervisionBinding, bind_job_supervision
+    from tools.environments.systemd_jobs import SystemdJobSupervisor
+
+    cwd = tmp_path / "deleted-cwd"
+    cwd.mkdir()
+    environment = LocalEnvironment(cwd=str(cwd))
+    supervisor = SystemdJobSupervisor(target, str(tmp_path / "state"))
+    supervisor.prepare()
+    try:
+        cwd.rmdir()
+        with bind_job_supervision(SupervisionBinding(supervisor.state_dir, supervisor=supervisor)):
+            process = environment._run_bash("pwd")
+            assert process.wait(timeout=15) == 0
+            assert process.stdout.read().strip() == str(tmp_path)
+            assert environment.cwd == str(tmp_path)
+            process.stdout.close()
+    finally:
+        supervisor.stop()
+        environment.cleanup()
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("backend", ["local"])
 def test_supervised_local_command_ignores_non_identifier_inherited_environment(tmp_path, target, monkeypatch):
     from tools.environments.local import LocalEnvironment
     from tools.environments.supervised_execution import SupervisionBinding, bind_job_supervision
@@ -282,6 +307,14 @@ def test_supervisor_preserves_input_and_treats_lost_control_as_unknown(tmp_path,
         recovered_jobs = supervisor.jobs()
         assert len(recovered_jobs) == 2
         assert any(supervisor.inspect(receipt) is JobState.RUNNING for receipt in recovered_jobs)
+        # Even if the fence acknowledgement is also lost, the same turn cannot
+        # retry with a fresh identity. Reconnect retains the original job intent.
+        uncertain.execute = target
+        with pytest.raises(SupervisionError, match="sealed"):
+            uncertain.start("touch duplicate-after-lost-ack", cwd=str(tmp_path), environment_names=("PATH",))
+        assert supervisor.jobs() == recovered_jobs
+        assert not (tmp_path / "duplicate-after-lost-ack").exists()
+        assert (tmp_path / "state/fence/sealed").exists()
     finally:
         supervisor.stop()
 

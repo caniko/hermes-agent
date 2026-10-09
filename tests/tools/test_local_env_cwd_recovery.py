@@ -77,6 +77,27 @@ def _close_fds(fds):
 class TestRunBashCwdRecovery:
     """End-to-end recovery: deleted ``self.cwd`` must not crash Popen."""
 
+    @pytest.mark.platforms("linux")
+    def test_recovers_deleted_cwd_before_supervised_submission(self, tmp_path):
+        from tools.environments.supervised_execution import SupervisionBinding, bind_job_supervision
+
+        wedged = tmp_path / "deleted-supervised-cwd"
+        wedged.mkdir()
+        with patch.object(LocalEnvironment, "init_session", autospec=True, return_value=None):
+            env = LocalEnvironment(cwd=str(wedged), timeout=10)
+        wedged.rmdir()
+        supervisor = MagicMock()
+        handle = object()
+        with bind_job_supervision(SupervisionBinding(str(tmp_path / "supervision"))), patch(
+            "tools.environments.local._find_bash", return_value="/bin/bash"
+        ), patch("tools.environments.supervised_execution.local_supervisor", return_value=supervisor), patch(
+            "tools.environments.supervised_execution.SupervisedProcessHandle", return_value=handle
+        ):
+            assert env._run_bash("pwd") is handle
+        assert env.cwd == str(tmp_path)
+        assert supervisor.start.call_args.kwargs["cwd"] == str(tmp_path)
+        assert os.path.isdir(env.cwd)
+
     def test_recovers_when_cwd_deleted_after_init(self, tmp_path, caplog):
         """Reproduces the wedge from #17558: cwd was valid when the
         snapshot was taken, but a subsequent command deleted it before the
