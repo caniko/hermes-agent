@@ -21,6 +21,10 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
     if error is not None:
         return error
     try:
+        # aiohttp decodes Content-Encoding before read(); only identity bodies
+        # can prove the exact bytes supplied by the authenticated client.
+        if any(value.strip().lower() != "identity" for value in request.headers.getall("Content-Encoding", [])):
+            raise ValueError("Stopping an admission requires an unencoded HTTP body")
         wire_body = await request.read()
         body = await request.json()
         if not isinstance(body, dict) or "hosted_room_dispatch" in body:

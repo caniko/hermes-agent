@@ -1,8 +1,10 @@
 """Cancellation owns an idempotency key before a delayed create can start work."""
 
 import asyncio
+import gzip
 import hashlib
 import json
+import zlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -51,6 +53,16 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
         async with TestClient(TestServer(app)) as client:
             pending = None
             try:
+                # aiohttp decompresses these valid JSON bodies before read().
+                # Reject them without creating a misleading digest/tombstone.
+                with patch.object(adapter._run_idempotency_store, "reserve", wraps=adapter._run_idempotency_store.reserve) as reserve:
+                    for encoding, compress in (("gzip", gzip.compress), ("deflate", zlib.compress)):
+                        rejected = await client.post("/v1/runs/stop", data=compress(json.dumps(body).encode()),
+                                                     headers={**headers, "Content-Type": "application/json",
+                                                              "Content-Encoding": encoding})
+                        assert rejected.status == 400
+                        assert "admission" not in await rejected.json()
+                    reserve.assert_not_called()
                 if when == "during_admission":
                     pending = asyncio.create_task(client.post("/v1/runs", json=body, headers=headers))
                     await asyncio.wait_for(entered.wait(), 10)
@@ -104,7 +116,8 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
             assert rebound["admission"]["body_sha256"] == hashlib.sha256(wire.encode()).hexdigest()
             payload = wire.encode("iso-8859-1")
             stopped = await client.post("/v1/runs/stop", data=payload,
-                                        headers={**headers, "Content-Type": "application/json; charset=iso-8859-1"})
+                                        headers={**headers, "Content-Type": "application/json; charset=iso-8859-1",
+                                                 "Content-Encoding": "identity"})
             assert stopped.status == 200
             rebound = await stopped.json()
             assert rebound["run_id"] == receipt["run_id"]
