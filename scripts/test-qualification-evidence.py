@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -26,11 +27,78 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as location:
             directory = Path(location)
             self.report(directory)
+            nested = directory / "native" / "receipt.json"
+            nested.parent.mkdir()
+            nested.write_text('{"passed": true}', encoding="utf-8")
             evidence.seal(directory, "success", True)
             receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8-sig"))
             self.assertFalse(receipt["qualified"])
             self.assertEqual(receipt["reports"][0]["retries"], 0)
             self.assertEqual(receipt["members"]["report.xml"], evidence.sha256(directory / "report.xml"))
+            self.assertEqual(receipt["members"]["native/receipt.json"], evidence.sha256(nested))
+            self.assertNotIn("receipt.json", receipt["members"])
+
+    def test_initialize_requires_the_requested_32_day_retention_limit(self):
+        for days in (31, 32):
+            with self.subTest(days=days), tempfile.TemporaryDirectory() as location:
+                directory = Path(location) / "evidence"
+                with patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "github-hosted",
+                                             "GITHUB_RETENTION_DAYS": str(days)}), patch.object(
+                    evidence, "identity", return_value={"head": "a" * 40}
+                ), patch.object(evidence.subprocess, "check_output", return_value="a" * 40):
+                    if days == 31:
+                        with self.assertRaisesRegex(RuntimeError, "32 days"):
+                            evidence.initialize(directory)
+                        self.assertFalse(directory.exists())
+                    else:
+                        evidence.initialize(directory)
+                        self.assertEqual(json.loads((directory / "source.json").read_text())["head"], "a" * 40)
+
+    def test_identity_rejects_later_runs_of_the_same_pr_head(self):
+        with tempfile.TemporaryDirectory() as location:
+            event = Path(location) / "event.json"
+            event.write_text(json.dumps({"pull_request": {
+                "number": 4, "head": {"sha": "a" * 40}, "base": {"sha": "b" * 40}}}))
+            environment = {"GITHUB_EVENT_PATH": str(event), "GITHUB_EVENT_NAME": "pull_request",
+                           "GITHUB_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "200",
+                           "GITHUB_REPOSITORY": "owner/repo", "GITHUB_WORKFLOW_REF": "workflow@ref",
+                           "GITHUB_WORKFLOW_SHA": "c" * 40}
+            current = {"id": 200, "workflow_id": 3, "run_number": 200, "run_attempt": 1,
+                       "head_sha": "a" * 40, "event": "pull_request", "pull_requests": [{"number": 4}]}
+            unrelated = {**current, "id": 100, "run_number": 100, "pull_requests": [{"number": 9}]}
+            for earlier_prs in ([{"number": 4}], [{"number": 9}], []):
+                with self.subTest(earlier_prs=earlier_prs):
+                    earlier = {**current, "id": 99, "run_number": 99, "pull_requests": earlier_prs}
+                    def api(path):
+                        if path == "pulls/4":
+                            return {"head": {"sha": "a" * 40}}
+                        if path == "actions/runs/200":
+                            return current
+                        # An earlier same-head run can be beyond the first page.
+                        if path.endswith("page=1"):
+                            return {"total_count": 101, "workflow_runs": [current] + [
+                                {**unrelated, "id": 100 + index, "run_number": 100 + index}
+                                for index in range(99)]}
+                        if path.endswith("page=2"):
+                            return {"total_count": 101, "workflow_runs": [earlier]}
+                        self.fail(f"Unexpected API path: {path}")
+                    with patch.dict(os.environ, environment), patch.object(evidence, "api", side_effect=api):
+                        if earlier_prs == [{"number": 9}]:
+                            self.assertEqual(evidence.identity()["run_id"], 200)
+                        else:
+                            with self.assertRaisesRegex(RuntimeError, "[Ee]arlier"):
+                                evidence.identity()
+
+    def test_identity_rejects_retry_attempts_before_querying_run_history(self):
+        with tempfile.TemporaryDirectory() as location:
+            event = Path(location) / "event.json"
+            event.write_text(json.dumps({"pull_request": {"number": 4, "head": {"sha": "a" * 40}}}))
+            with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event),
+                                         "GITHUB_EVENT_NAME": "pull_request", "GITHUB_RUN_ATTEMPT": "2"}), patch.object(
+                evidence, "api", return_value={"head": {"sha": "a" * 40}}
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Retries"):
+                    evidence.identity()
 
     def test_retry_records_reject_success_and_survive_in_diagnostics(self):
         for tag in ["rerunFailure", "rerunError", "flakyFailure", "flakyError"]:

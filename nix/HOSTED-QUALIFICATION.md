@@ -3,7 +3,9 @@
 This source successor starts from worker
 `72433d338b79b97f0e8ebe1cfdacb0e1238ea655`. It adds an admission proof to the
 authenticated idempotent Stop endpoint. The proof hashes the normalized key and
-the original HTTP body bytes, before charset decoding, and names the reserved root. A conflicting request
+the original HTTP body bytes, before charset decoding, and names the reserved root.
+Non-identity `Content-Encoding` is rejected before reservation because aiohttp
+otherwise decompresses the body before the handler can hash it. A conflicting request
 or failed authentication cannot receive a proof.
 
 The hosted portable lane exercises ordinary and supervised admission before
@@ -46,8 +48,15 @@ It records unavailable capacity as a failure. There is no local or smaller-runne
 fallback for this gate. The personal-account fork currently lacks this owner
 prerequisite. The portable lane can still provide separate source evidence.
 
-All required artifacts use 31 days of native GitHub retention. The final job
-reads actual creation and expiry timestamps and SHA-256 digests. Receipts remain
+All required artifacts request 32 days of native GitHub retention, so repository,
+organization and enterprise limits must permit at least 32 days. The final job
+still requires a full 31-day lifetime from actual creation and expiry timestamps
+and SHA-256 digests; the extra requested day covers provider timestamp rounding.
+Attempt 1 alone is insufficient: provider history must also show no earlier
+qualification workflow run for this PR/head, even after reopening or moving the
+branch away and back. Missing history cannot establish first-run qualification.
+Nested lifecycle receipts are hashed alongside reports and logs; only the
+top-level self-referential receipt is excluded from its member map. Receipts remain
 unqualified until independent exact-source acceptance. Historical failed and
 accepted revisions retain their own disposition. This workflow grants no worker
 enablement, dispatch, composition, recovery execution, or deployment authority.
