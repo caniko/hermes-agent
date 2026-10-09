@@ -1,7 +1,7 @@
 # Contributor email → GitHub login mappings
 
 This directory replaces appending entries to `AUTHOR_MAP` in
-`scripts/release.py`. The old dict caused constant merge conflicts when
+`scripts/releases/authors_legacy.py`. The old dict caused constant merge conflicts when
 several salvage PRs landed at once — every PR edited the same lines of the
 same file. Here, **each mapping is its own file**, and file additions never
 conflict.
@@ -29,10 +29,17 @@ janedoe
 
 ## Rules
 
-- Do NOT add new entries to `AUTHOR_MAP` in `scripts/release.py`. That dict
+- Do NOT add new entries to `AUTHOR_MAP` in `scripts/releases/authors_legacy.py`. That dict
   is frozen legacy data; the release tooling merges it with this directory
   (directory entries win on duplicates).
 - GitHub noreply emails (`<id>+<login>@users.noreply.github.com` and
   `<login>@users.noreply.github.com`) auto-resolve — no file needed.
 - The `Contributor Attribution Check` CI job fails a PR whose commits carry
-  an unmapped email; the failure message prints the exact command to run.
+   an unmapped email; the failure message prints the exact command to run.
+
+The attribution check and audit helper read Git's canonical `.mailmap` identities.
+Use a verified mailmap alias for an email spelling that would case-collide with
+an existing mapping filename. For shared placeholder addresses, bind the alias
+to **both the original author name and email** so other authors using that
+address remain unmapped. Record the original contribution and verified account
+with the alias; do not infer an identity from a placeholder address alone.
