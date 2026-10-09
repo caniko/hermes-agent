@@ -212,7 +212,11 @@ class TestStartRun:
     @pytest.mark.parametrize("message", [None, 1, "text", {}, {"role": "user"},
         {"role": "user", "content": None}, {"role": "user", "content": {}},
         {"role": "user", "content": [None]},
-        {"role": "user", "content": [{"type": "text", "text": None}]}])
+        {"role": "user", "content": [{"type": "text", "text": None}]},
+        {"role": "user", "content": [{"type": "input_text", "text": 1}]},
+        {"role": "user", "content": [{"type": "text"}]},
+        {"role": "user", "content": [{"type": "unsupported", "text": "not a message"}]},
+        {"role": "user", "content": [{"type": "text", "text": " "}]}])
     async def test_malformed_final_input_is_rejected_before_reservation(self, adapter, message):
         app = _create_runs_app(adapter)
         with patch.object(adapter, "_create_agent") as create:
@@ -1129,6 +1133,44 @@ class TestSteerRun:
 
 
 class TestHostedRoomRunEvents:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("withdrawal", ["expiry", "revocation"])
+    @pytest.mark.parametrize("delivery", ["event", "keepalive"])
+    async def test_stream_revalidates_room_grants_before_every_write(self, auth_adapter, monkeypatch, withdrawal, delivery):
+        from types import SimpleNamespace
+        from gateway import hosted_rooms
+        from gateway.hosted_room_peer import decode_room_grant, issue_room_grant
+
+        grant = issue_room_grant(auth_adapter._room_grant_secret(), grant_id="stream-grant",
+            room_id="room-stream", home_install_id="home-stream", authority_gateway_id="home-stream",
+            authority_epoch=1, member_id="reader", target_install_id=hosted_rooms.local_authority_gateway_id(),
+            target_profile="default", permissions=("status",), ttl_seconds=300)
+        claims = decode_room_grant(auth_adapter._room_grant_secret(), grant, permission="status")
+        hosted_rooms.reserve_peer_room(hosted_rooms.default_db_path(), claims=claims,
+                                       expires_at=float(claims["status_expires_at"]))
+        run_id = "run_room_live_stream"
+        headers = {"Authorization": f"HermesRoom {grant}"}
+        request = SimpleNamespace(headers=headers, method="GET", path=f"/v1/runs/{run_id}/events")
+        auth_adapter._run_owners[run_id] = auth_adapter._run_idempotency_scope(request)
+        auth_adapter._set_run_status(run_id, "running")
+        stream = auth_adapter._run_streams[run_id] = _RunStream()
+        monkeypatch.setattr("gateway.platforms.api_server.CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS", 0.01)
+        async with TestClient(TestServer(_create_runs_app(auth_adapter))) as cli:
+            response = await cli.get(f"/v1/runs/{run_id}/events", headers=headers)
+            assert response.status == 200
+            assert await response.content.readline() == b": open\n"
+            assert await response.content.readline() == b"\n"
+            if withdrawal == "expiry":
+                monkeypatch.setattr("gateway.hosted_room_peer.clock", lambda now=None: float(claims["status_expires_at"]))
+            else:
+                hosted_rooms.revoke_room_grant_scope(hosted_rooms.default_db_path(), claims=claims,
+                    expires_at=float(claims["status_expires_at"]))
+            if delivery == "event":
+                stream.put_nowait({"event": "tool.completed", "output": "withdrawn private output"})
+            remaining = await asyncio.wait_for(response.text(), 2)
+            assert "withdrawn private output" not in remaining
+            assert not stream.subscribers
+
     @pytest.mark.asyncio
     async def test_status_grant_streams_only_its_members_run(self, auth_adapter):
         from types import SimpleNamespace

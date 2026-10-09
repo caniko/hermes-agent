@@ -294,7 +294,10 @@ def test_stop_fences_admitted_intent_even_when_no_exit_receipt_exists(tmp_path, 
                 with pytest.raises(SupervisionError, match="stop acknowledgement"):
                     call("stop")
                 receipt = authority.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=?", (job,)).fetchone()
-                assert tuple(receipt) == (-15, 0)  # An exit code is not proof of settlement.
+                assert tuple(receipt) == (None, 0)  # An unsent Stop supplies no foreground exit evidence.
+                if failure == "unavailable-exit":
+                    observation = call("observe", job=job)
+                    assert observation["state"] == "running" and observation["exit_code"] is None
                 assert call("reserve", request="waiter", roots=[str(root)])["state"] == "pending"
             stopped = call("stop")
             assert stopped["drained"] and stopped["state"] == "stopping"
