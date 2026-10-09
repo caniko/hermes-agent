@@ -1841,7 +1841,7 @@ def _close_recovery_authority(authority):
 
 def _recovery_capabilities(self):
     return {"version": 1, "durable_lineage_stop": self._run_idempotency_store.durable,
-            "ordinary_stop_admission": True, "event_cursor": True}
+            "ordinary_stop_admission": True, "event_cursor": True, "admission_binding": 1}
 
 
 async def _handle_stop_admission(self, request, *, _api_server):

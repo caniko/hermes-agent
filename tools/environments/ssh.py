@@ -199,7 +199,8 @@ class SSHEnvironment(BaseEnvironment):
         # Symlink staging avoids fragile GNU tar --transform rules. On Windows
         # without Developer Mode symlink creation raises OSError winerror 1314;
         # only that case falls back to a plain copy, other OSErrors re-raise.
-        with tempfile.TemporaryDirectory(prefix="hermes-ssh-bulk-") as staging:
+        with tempfile.TemporaryDirectory(prefix="hermes-ssh-bulk-") as staging, \
+                tempfile.TemporaryFile() as members:
             for host_path, remote_path in files:
                 try:
                     rel_remote = os.path.relpath(remote_path, base)
@@ -215,11 +216,15 @@ class SSHEnvironment(BaseEnvironment):
                     if getattr(e, "winerror", None) != 1314:
                         raise
                     shutil.copy2(host_path, staged)
+                members.write(os.fsencode("./" + rel_remote) + b"\0")
 
-            # --no-overwrite-dir keeps tar from stamping the staging dir's mode onto
-            # existing dirs (e.g. /home/<user>); a umask-002 0775 home breaks sshd StrictModes.
-            ssh_cmd = self._build_ssh_command() + [f"tar xf - --no-overwrite-dir -C {shlex.quote(base)}"]
-            tar_proc = subprocess.Popen(["tar", "-chf", "-", "-C", staging, "."], stdin=subprocess.DEVNULL,
+            # Archive only files: neither GNU nor BSD tar can stamp staging
+            # directory metadata onto an existing worker/login home. The NUL
+            # list keeps arbitrary filenames and large batches out of argv.
+            members.flush()
+            members.seek(0)
+            ssh_cmd = self._build_ssh_command() + [f"tar xf - -C {shlex.quote(base)}"]
+            tar_proc = subprocess.Popen(["tar", "-chf", "-", "-C", staging, "--null", "-T", "-"], stdin=members,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 ssh_proc = subprocess.Popen(ssh_cmd, stdin=tar_proc.stdout,

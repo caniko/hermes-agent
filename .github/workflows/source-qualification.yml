@@ -1,0 +1,210 @@
+name: Exact-head worker qualification
+on:
+  pull_request:
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+concurrency:
+  group: worker-source-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+jobs:
+  qualification_helpers:
+    name: Qualification helper contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: python3 scripts/test-qualify-job-lifecycle.py
+        if: always()
+      - run: python3 scripts/test-qualification-evidence.py
+        if: always()
+      - run: python3 scripts/test-runner-readiness.py
+        if: always()
+  admission:
+    name: Admission evidence / ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        mode: [green, baseline-red]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HERMES_TEST_FILE_RETRIES: "0"
+      HERMES_TEST_WORKERS: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Bind exact source and provider readiness
+        run: |
+          evidence="$RUNNER_TEMP/qualification"
+          mkdir -p "$evidence"
+          echo "EVIDENCE=$evidence" >> "$GITHUB_ENV"
+          python3 scripts/qualification-evidence.py initialize "$evidence"
+      - name: Overlay original runtime only for expected RED
+        if: matrix.mode == 'baseline-red'
+        run: |
+          git fetch --no-tags --depth=1 origin 72433d338b79b97f0e8ebe1cfdacb0e1238ea655
+          git restore --source=72433d338b79b97f0e8ebe1cfdacb0e1238ea655 gateway/platforms/api_server_run_admission.py gateway/platforms/api_server_runs.py
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          path = Path(os.environ['EVIDENCE']) / 'source.json'
+          source = json.loads(path.read_text(encoding='utf-8-sig'))
+          source['runtime_baseline'] = '72433d338b79b97f0e8ebe1cfdacb0e1238ea655'
+          source['runtime_overlay_sha256'] = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in ['gateway/platforms/api_server_run_admission.py', 'gateway/platforms/api_server_runs.py', 'tests/gateway/test_api_server_run_admission.py']}
+          path.write_text(json.dumps(source, indent=2) + '\n', encoding='utf-8')
+          PY
+      - uses: ./.github/actions/setup-pm
+        with:
+          extras: '["messaging"]'
+          test-environment: 'true'
+      - name: Run admission assertions once
+        run: |
+          set -uo pipefail
+          set +e
+          scripts/run_tests.sh tests/gateway/test_api_server_run_admission.py --junitxml="$EVIDENCE/admission.xml" -o addopts= 2>&1 | tee "$EVIDENCE/admission.log"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$EVIDENCE/exit-status.txt"
+          if [ '${{ matrix.mode }}' = green ]; then test "$status" = 0; else
+            test "$status" = 1
+            python3 - <<'PY'
+          import os, xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = ET.parse(Path(os.environ['EVIDENCE']) / 'admission.xml').getroot()
+          cases = root.findall('.//testcase')
+          assert len(cases) == 4 and all(case.find('failure') is not None for case in cases)
+          assert all(case.get('name', '').startswith('test_stop_admission_fences_delayed_requests_after_restart[') for case in cases)
+          assert not root.findall('.//error') and not root.findall('.//skipped')
+          PY
+          fi
+      - name: Seal original evidence
+        if: always()
+        run: python3 scripts/qualification-evidence.py seal "$EVIDENCE" '${{ matrix.mode == 'baseline-red' && job.status == 'success' && 'expected-red' || job.status }}' --strict-reports
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: worker-proof-admission-${{ matrix.mode }}-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/qualification/
+          # Provider creation/expiry timestamps can differ by a second. Request
+          # a spare day; the actual-retention gate still requires all 31 days.
+          retention-days: 32
+          if-no-files-found: error
+
+  runner_readiness:
+    name: High memory / supported runner readiness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      label: ${{ steps.ready.outputs.label }}
+    env:
+      GH_TOKEN: ${{ secrets.HOSTED_RUNNER_READ_TOKEN || github.token }}
+      QUALIFICATION_LARGER_RUNNER: ${{ vars.QUALIFICATION_LARGER_RUNNER }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Read supported provider controls before scheduling
+        id: ready
+        # Preserve the 64 GiB MemTotal floor below. A nominal 64 GiB runner
+        # cannot meet it after kernel reservations; select the next larger size.
+        run: python3 scripts/runner-readiness.py --memory-gb 128 --destination runner-readiness.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: worker-proof-readiness-${{ github.event.pull_request.head.sha }}
+          path: runner-readiness.json
+          retention-days: 32
+          if-no-files-found: error
+
+  native:
+    name: Exact head / native lifecycle (${{ matrix.memory }})
+    needs: runner_readiness
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        memory: [ordinary, high-memory]
+    runs-on: ${{ matrix.memory == 'high-memory' && needs.runner_readiness.outputs.label || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NIX_CONFIG: "experimental-features = nix-command flakes\nlog-lines = 3000"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Bind exact source and runtime capacity
+        run: |
+          evidence="$RUNNER_TEMP/qualification"
+          mkdir -p "$evidence"
+          echo "EVIDENCE=$evidence" >> "$GITHUB_ENV"
+          echo "SIMIT_NIX_BUILD_RESULTS=$evidence/native" >> "$GITHUB_ENV"
+          python3 scripts/qualification-evidence.py initialize "$evidence"
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(uname -m)" = x86_64
+          if [ '${{ matrix.memory }}' = high-memory ]; then awk '/MemTotal/ {exit !($2 >= 64*1024*1024)}' /proc/meminfo; fi
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
+      - name: Run unchanged native installable and deadlines once
+        run: |
+          set -euo pipefail
+          mkdir -p "$SIMIT_NIX_BUILD_RESULTS"
+          git rev-parse HEAD > "$SIMIT_NIX_BUILD_RESULTS/revision"
+          printf '%s\n' '.#checks.x86_64-linux.target-job-lifecycle' > "$SIMIT_NIX_BUILD_RESULTS/installable"
+          python3 scripts/test-qualify-job-lifecycle.py
+          nix build --no-link --no-update-lock-file --max-jobs 1 --cores 2 --json .#checks.x86_64-linux.target-job-lifecycle 2> >(tee "$SIMIT_NIX_BUILD_RESULTS/build.log" >&2) | tee "$SIMIT_NIX_BUILD_RESULTS/result.json"
+          python3 scripts/qualify-job-lifecycle.py retain
+      - name: Preserve failed native diagnostics before sealing
+        if: always()
+        run: |
+          python3 scripts/qualify-job-lifecycle.py retain-diagnostics
+          python3 scripts/qualification-evidence.py seal "$EVIDENCE" '${{ job.status }}' --strict-reports
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: worker-proof-native-${{ matrix.memory }}-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/qualification/
+          retention-days: 32
+          if-no-files-found: error
+
+  retention:
+    name: Exact head / mandatory result and actual retention
+    needs: [qualification_helpers, admission, native, runner_readiness]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - run: python3 scripts/qualification-evidence.py artifacts worker-proof- 5 retention.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: worker-retention-${{ github.event.pull_request.head.sha }}
+          path: retention.json
+          retention-days: 32
+          if-no-files-found: error
+      - name: Require GREEN and retained audit
+        run: |
+          test '${{ needs.qualification_helpers.result }}' = success
+          test '${{ needs.admission.result }}' = success
+          test '${{ needs.native.result }}' = success
+          test '${{ needs.runner_readiness.result }}' = success
+          python3 scripts/qualification-evidence.py artifacts worker-retention- 1 retention-audit.json

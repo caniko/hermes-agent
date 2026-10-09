@@ -15,14 +15,17 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location("qualification", Path(__file__).with_name("qualify-job-lifecycle.py"))
 qualification = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(qualification)
+roster_path = Path(__file__).resolve().parents[1] / "tests/scripts/fixtures/job-lifecycle-roster.json"
+roster = json.loads(roster_path.read_text(encoding="utf-8-sig"))
 
 
 class QualificationTests(unittest.TestCase):
     def report(self, directory):
         root = ET.Element("testsuites")
         suite = ET.SubElement(root, "testsuite")
-        for name in sorted(qualification.REQUIRED):
-            ET.SubElement(suite, "testcase", name=name)
+        for classname, names in roster.items():
+            for name in names:
+                ET.SubElement(suite, "testcase", classname=classname, name=name)
         path = Path(directory) / "report.xml"
         return path, root, suite
 
@@ -32,7 +35,7 @@ class QualificationTests(unittest.TestCase):
             ET.ElementTree(root).write(path)
             receipt = qualification.qualify(path, {"revision": "a" * 40})
             self.assertEqual(receipt["reportSha256"], hashlib.sha256(path.read_bytes()).hexdigest())
-            self.assertEqual(receipt["tests"], len(qualification.REQUIRED))
+            self.assertEqual(receipt["tests"], sum(map(len, roster.values())))
             self.assertFalse(receipt["paperclipDispatchQualified"])
 
     def test_unsuccessful_or_missing_proof_is_rejected(self):
@@ -53,9 +56,25 @@ class QualificationTests(unittest.TestCase):
     def test_duplicate_cases_cannot_hide_retries(self):
         with tempfile.TemporaryDirectory() as directory:
             path, root, suite = self.report(directory)
-            ET.SubElement(suite, "testcase", name=suite[0].get("name"))
+            ET.SubElement(suite, "testcase", **suite[0].attrib)
             ET.ElementTree(root).write(path)
             with self.assertRaisesRegex(ValueError, "duplicate or retried"):
+                qualification.qualify(path, {"revision": "a" * 40})
+
+    def test_unrelated_additions_cannot_replace_an_accepted_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, root, suite = self.report(directory)
+            suite[0].set("name", "unrelated-added-case")
+            ET.ElementTree(root).write(path)
+            with self.assertRaisesRegex(ValueError, "Incomplete lifecycle proof"):
+                qualification.qualify(path, {"revision": "a" * 40})
+
+    def test_matching_name_in_another_module_cannot_replace_a_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, root, suite = self.report(directory)
+            suite[0].set("classname", "unrelated.module")
+            ET.ElementTree(root).write(path)
+            with self.assertRaisesRegex(ValueError, "Incomplete lifecycle proof"):
                 qualification.qualify(path, {"revision": "a" * 40})
 
     def diagnostic_fixture(self, directory):

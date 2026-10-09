@@ -1,6 +1,10 @@
 """Cancellation owns an idempotency key before a delayed create can start work."""
 
 import asyncio
+import gzip
+import hashlib
+import json
+import zlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,7 +26,7 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     (tmp_path / "config.yaml").write_text(yaml.safe_dump({
         "terminal": {"backend": "local", "cwd": str(tmp_path)}}))
-    body = {"input": "maintain directory", "execution_context": {
+    body = {"input": "maintain directory café", "execution_context": {
         "version": 1, "backend": "local", "cwd": str(tmp_path), "lifetime": "wait_for_jobs"}}
     if not supervised:
         body.pop("execution_context")
@@ -49,6 +53,16 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
         async with TestClient(TestServer(app)) as client:
             pending = None
             try:
+                # aiohttp decompresses these valid JSON bodies before read().
+                # Reject them without creating a misleading digest/tombstone.
+                with patch.object(adapter._run_idempotency_store, "reserve", wraps=adapter._run_idempotency_store.reserve) as reserve:
+                    for encoding, compress in (("gzip", gzip.compress), ("deflate", zlib.compress)):
+                        rejected = await client.post("/v1/runs/stop", data=compress(json.dumps(body).encode()),
+                                                     headers={**headers, "Content-Type": "application/json",
+                                                              "Content-Encoding": encoding})
+                        assert rejected.status == 400
+                        assert "admission" not in await rejected.json()
+                    reserve.assert_not_called()
                 if when == "during_admission":
                     pending = asyncio.create_task(client.post("/v1/runs", json=body, headers=headers))
                     await asyncio.wait_for(entered.wait(), 10)
@@ -56,6 +70,14 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
                 assert stopped.status == 200
                 receipt = await stopped.json()
                 assert receipt["status"] == "cancelled"
+                assert receipt.get("admission") == {
+                    "version": 1, "root_run_id": receipt["run_id"],
+                    "key_sha256": hashlib.sha256(headers["Idempotency-Key"].encode()).hexdigest(),
+                    "body_sha256": hashlib.sha256(json.dumps(body).encode()).hexdigest(),
+                }
+                assert receipt["stop_requested"] is True
+                assert receipt["lineage_settled"] is True
+                assert receipt["lineage"] == [{"run_id": receipt["run_id"], "status": "cancelled"}]
                 release.set()
                 if pending:
                     assert (await (await pending).json())["run_id"] == receipt["run_id"]
@@ -83,6 +105,29 @@ async def test_stop_admission_fences_delayed_requests_after_restart(tmp_path, mo
             assert replay.status == 202
             assert (await replay.json())["run_id"] == receipt["run_id"]
             stopped = await client.post("/v1/runs/stop", json=body, headers=headers)
-            assert (await stopped.json())["status"] == "cancelled"
+            resumed = await stopped.json()
+            assert resumed["status"] == "cancelled"
+            assert resumed["admission"] == receipt["admission"]
+            wire = json.dumps(body, indent=2, ensure_ascii=False)
+            stopped = await client.post("/v1/runs/stop", data=wire,
+                                        headers={**headers, "Content-Type": "application/json"})
+            rebound = await stopped.json()
+            assert rebound["run_id"] == receipt["run_id"]
+            assert rebound["admission"]["body_sha256"] == hashlib.sha256(wire.encode()).hexdigest()
+            payload = wire.encode("iso-8859-1")
+            stopped = await client.post("/v1/runs/stop", data=payload,
+                                        headers={**headers, "Content-Type": "application/json; charset=iso-8859-1",
+                                                 "Content-Encoding": "identity"})
+            assert stopped.status == 200
+            rebound = await stopped.json()
+            assert rebound["run_id"] == receipt["run_id"]
+            assert rebound["admission"]["body_sha256"] == hashlib.sha256(payload).hexdigest()
+            conflict = await client.post("/v1/runs/stop", json={**body, "input": "different request"}, headers=headers)
+            assert conflict.status == 409
+            assert "admission" not in await conflict.json()
+            unauthenticated = await client.post("/v1/runs/stop", json=body,
+                                                headers={**headers, "Authorization": "Bearer wrong-fixture-key"})
+            assert unauthenticated.status == 401
+            assert "admission" not in await unauthenticated.json()
     finally:
         restarted._run_idempotency_store.close()

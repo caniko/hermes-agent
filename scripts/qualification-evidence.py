@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Exact-head hosted qualification receipts and provider-retention readback."""
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import subprocess
+import urllib.request
+import xml.etree.ElementTree as ET
+
+MIN_RETENTION_SECONDS = 31 * 24 * 60 * 60
+REQUESTED_RETENTION_DAYS = 32
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def api(path):
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/{path}",
+        headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                 "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+
+def identity():
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8-sig"))
+    require(os.environ["GITHUB_EVENT_NAME"] == "pull_request", "Qualification requires a PR event")
+    pr = event["pull_request"]
+    head = pr["head"]["sha"]
+    require(api(f"pulls/{pr['number']}")["head"]["sha"] == head, "PR head advanced; evidence is historical")
+    require(int(os.environ["GITHUB_RUN_ATTEMPT"]) == 1, "Retries cannot qualify; publish a source successor")
+    run_id = int(os.environ["GITHUB_RUN_ID"])
+    run = api(f"actions/runs/{run_id}")
+    require(run["head_sha"] == head and run["event"] == "pull_request" and run["run_attempt"] == 1
+            and any(item["number"] == pr["number"] for item in run["pull_requests"]),
+            "Provider run identity does not match the original PR attempt")
+    page = 1
+    observed = False
+    while True:
+        require(page <= 10, "Provider history exceeds the supported 1000-run pagination bound")
+        response = api(f"actions/workflows/{run['workflow_id']}/runs?head_sha={head}"
+                       f"&event=pull_request&per_page=100&page={page}")
+        require(response["total_count"] <= 1000, "Too much same-head history to establish the first run")
+        for prior in response["workflow_runs"]:
+            if prior["id"] == run_id:
+                observed = True
+            if prior["run_number"] >= run["run_number"]:
+                continue
+            require(prior["pull_requests"], "Earlier run PR identity is absent; first run is unproven")
+            require(not any(item["number"] == pr["number"] for item in prior["pull_requests"]),
+                    f"Earlier qualification run {prior['id']} used this PR/head; publish a source successor")
+        if len(response["workflow_runs"]) < 100 or page * 100 >= response["total_count"]:
+            break
+        page += 1
+    require(observed, "Current qualification run is missing from provider history")
+    return {"repository": os.environ["GITHUB_REPOSITORY"], "pr": pr["number"], "head": head,
+            "base": pr["base"]["sha"], "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
+            "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"], "run_id": run_id,
+            "workflow_id": run["workflow_id"], "run_number": run["run_number"], "run_attempt": 1}
+
+
+def initialize(directory):
+    require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "Only GitHub-hosted runners qualify")
+    require(int(os.environ["GITHUB_RETENTION_DAYS"]) >= REQUESTED_RETENTION_DAYS,
+            f"Repository/organization retention must allow {REQUESTED_RETENTION_DAYS} days")
+    source = identity()
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, encoding="utf-8", timeout=30).strip()
+    require(revision == source["head"], "Checkout is not the exact PR head")
+    source.update({"tested_source": revision, "platform": platform.platform(), "machine": platform.machine(),
+                   "receipt_tool_sha256": sha256(__file__),
+                   "locks": {str(path): sha256(path) for path in
+                             (Path("pnpm-lock.yaml"), Path("flake.lock"), Path("Cargo.lock"),
+                              Path("uv.lock"), Path("packages/paperclip-runner/runner/Cargo.lock")) if path.is_file()}})
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "source.json").write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8")
+
+
+def seal(directory, outcome, strict_reports):
+    source = json.loads((directory / "source.json").read_text(encoding="utf-8-sig"))
+    reports = []
+    rejected = []
+    for path in sorted(directory.rglob("*.xml")):
+        root = ET.parse(path).getroot()
+        cases = root.findall(".//testcase")
+        require(cases, f"Empty JUnit report: {path}")
+        identities = [(case.get("classname"), case.get("name")) for case in cases]
+        failures = root.findall(".//failure") + root.findall(".//error")
+        skipped = root.findall(".//skipped")
+        retried = [node for node in root.iter()
+                   if any(marker in node.tag.lower() for marker in ("retry", "rerun", "flaky"))]
+        if outcome == "success":
+            if len(identities) != len(set(identities)):
+                rejected.append(f"Duplicate/retried JUnit cases: {path}")
+            if failures or retried:
+                rejected.append(f"Failed or retried test: {path}")
+            if strict_reports and skipped:
+                rejected.append(f"Mandatory test skipped: {path}")
+        reports.append({"path": str(path.relative_to(directory)), "cases": len(cases),
+                        "failures": len(failures), "skipped": len(skipped), "retries": len(retried)})
+    if strict_reports:
+        if not reports:
+            rejected.append("Mandatory JUnit evidence is missing")
+    receipt = {"schema": "hosted-qualification.v1", **source, "outcome": outcome,
+                "qualified": False, "reports": reports, "rejected": rejected,
+               "members": {str(path.relative_to(directory)): sha256(path)
+                            for path in sorted(directory.rglob("*")) if path.is_file() and path != directory / "receipt.json"}}
+    (directory / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    require(not rejected, "; ".join(rejected))
+
+
+def artifacts(prefix, count, destination):
+    source = identity()
+    required_names = {
+        "worker-proof-": {f"worker-proof-{kind}-{source['head']}" for kind in (
+            "admission-green", "admission-baseline-red", "readiness", "native-ordinary", "native-high-memory")},
+        "worker-retention-": {f"worker-retention-{source['head']}"},
+    }
+    require(prefix in required_names and count == len(required_names[prefix]), "Unknown artifact identity contract")
+    retained = []
+    page = 1
+    while True:
+        response = api(f"actions/runs/{source['run_id']}/artifacts?per_page=100&page={page}")
+        for artifact in response["artifacts"]:
+            if not artifact["name"].startswith(prefix):
+                continue
+            created = dt.datetime.fromisoformat(artifact["created_at"].replace("Z", "+00:00"))
+            expiry = dt.datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00"))
+            lifetime = (expiry - created).total_seconds()
+            require(not artifact["expired"] and lifetime >= MIN_RETENTION_SECONDS,
+                    f"Artifact {artifact['id']} lifetime is only {lifetime} seconds")
+            digest = artifact.get("digest", "")
+            require(digest.startswith("sha256:") and len(digest) == 71, "Provider artifact SHA-256 is missing")
+            require(artifact["workflow_run"]["head_sha"] == source["head"], "Artifact workflow source mismatch")
+            retained.append({"id": artifact["id"], "name": artifact["name"], "sha256": digest,
+                             "created_at": artifact["created_at"], "expires_at": artifact["expires_at"],
+                             "retention_seconds": lifetime})
+        if len(response["artifacts"]) < 100:
+            break
+        page += 1
+    require(len(retained) == count, f"Expected {count} required artifacts, found {len(retained)}")
+    require({artifact["name"] for artifact in retained} == required_names[prefix],
+            "Required artifact identities do not match this source")
+    receipt = {"schema": "hosted-retention.v1", **source, "qualified": False, "artifacts": retained}
+    Path(destination).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    init = sub.add_parser("initialize")
+    init.add_argument("directory", type=Path)
+    finish = sub.add_parser("seal")
+    finish.add_argument("directory", type=Path)
+    finish.add_argument("outcome")
+    finish.add_argument("--strict-reports", action="store_true")
+    audit = sub.add_parser("artifacts")
+    audit.add_argument("prefix")
+    audit.add_argument("count", type=int)
+    audit.add_argument("destination")
+    args = parser.parse_args()
+    if args.command == "initialize":
+        initialize(args.directory)
+    elif args.command == "seal":
+        seal(args.directory, args.outcome, args.strict_reports)
+    else:
+        artifacts(args.prefix, args.count, args.destination)
+
+
+if __name__ == "__main__":
+    main()
