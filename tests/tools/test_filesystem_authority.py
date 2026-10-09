@@ -21,6 +21,9 @@ from tests.tools.test_target_job_supervision import wait_for
 @pytest.mark.parametrize("backend", ["local"])
 def test_systemd_mount_properties_reach_manager_with_exact_paths(tmp_path, target):
     import json
+    import sys
+    import sysconfig
+    from pathlib import Path
     from tools.environments.job_supervision import JobReceipt
 
     base = tmp_path / 'worker %t "state" \\ '
@@ -82,6 +85,11 @@ def test_systemd_mount_properties_reach_manager_with_exact_paths(tmp_path, targe
         assert property_value("ProtectHome") == "tmpfs"
         assert any(source == str(state / row["id"] / "fence") and destination == "/run/hermes-job-fence"
                    for source, destination, *_ in property_value("BindReadOnlyPaths"))
+        readonly = property_value("BindReadOnlyPaths")
+        executable = str(Path(sys._base_executable).resolve(strict=True))
+        for path in (executable, sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib")):
+            assert any(source == str(Path(path).resolve(strict=True)) and destination == path
+                       for source, destination, *_ in readonly)
     finally:
         call("stop")
         assert call("release")["state"] == "settled"
@@ -280,7 +288,7 @@ def test_stop_fences_admitted_intent_even_when_no_exit_receipt_exists(tmp_path, 
             with monkeypatch.context() as lost_stop:
                 def fail_stop(*args, **kwargs):
                     raise SupervisionError("stop acknowledgement was lost")
-                lost_stop.setattr(provider, "stop_job", fail_stop)
+                lost_stop.setattr(provider, "stop_jobs", fail_stop)
                 with pytest.raises(SupervisionError, match="stop acknowledgement"):
                     call("stop")
                 receipt = authority.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=?", (job,)).fetchone()
@@ -378,7 +386,7 @@ def test_observation_reuses_exit_evidence_but_retains_ownership_until_stop(tmp_p
             with monkeypatch.context() as lost_stop:
                 def unavailable_stop(*args):
                     raise SupervisionError("stop acknowledgement was lost")
-                lost_stop.setattr(provider, "stop_job", unavailable_stop)
+                lost_stop.setattr(provider, "stop_jobs", unavailable_stop)
                 with pytest.raises(SupervisionError, match="stop acknowledgement"):
                     call("observe", job=job, offset=0)
                 recorded = authority.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=?", (job,)).fetchone()
@@ -471,7 +479,8 @@ def test_supervisor_uses_authenticated_socket_over_local_and_ssh(tmp_path, targe
             descriptor = {"authority": authority.store.authority_id, "principal": "test-controller", "request": "one", "fingerprint": "one",
                           "roots": [str(root)]}
             a = FilesystemSupervisor(call, descriptor, {"PATH": os.environ["PATH"]})
-            b = FilesystemSupervisor(call, {**descriptor, "request": "two", "fingerprint": "two"}, {})
+            b = FilesystemSupervisor(call, {**descriptor, "request": "two", "fingerprint": "two"},
+                                    {"PATH": os.environ["PATH"]})
             try:
                 a.prepare()
                 with pytest.raises(OwnershipPending):
@@ -493,13 +502,84 @@ def test_supervisor_uses_authenticated_socket_over_local_and_ssh(tmp_path, targe
                 assert a.settled()
                 with pytest.raises(OwnershipPending):
                     b.prepare()
-                a.release()
+                row = authority.store.get("test-controller", "one")
+                provider = authority._supervisor(row, prepare=False)
+                control = __import__("pathlib").Path(provider.state_dir)
+                payloads = [control / ("job-" + job.id) / name
+                            for name in ("input", "command", "environment", "output")]
+                assert all(path.exists() for path in payloads)
+                cleanup = provider.cleanup_payloads
+                def unavailable_cleanup():
+                    raise SupervisionError("payload cleanup transport unavailable")
+                provider.cleanup_payloads = unavailable_cleanup
+                with pytest.raises(SupervisionError):
+                    a.release()
+                assert all(path.exists() for path in payloads)
+                provider.cleanup_payloads = cleanup
+                # Restart after the durable release decision but before its
+                # cleanup/reply. Replay must finish cleanup without replaying work.
+                authority.close()
+                authority = FilesystemAuthority(state, policy, supervisor_factory=lambda row, uid:
+                    SystemdJobSupervisor(target, str(state / row["id"])))
+                server.authority = authority
+                assert a.release()["state"] == "settled"
+                assert not any(path.exists() for path in payloads)
+                assert (control / "fence/sealed").is_file()
+                assert (control / ("job-" + job.id)).is_dir()
+                assert a.release()["state"] == "settled"
+                assert (root / "executions").read_text() == "once\n"
                 b.prepare()
+                # Exercise the authority/client boundary, not just the provider:
+                # serial five-second stops exceed this transport's existing bound.
+                ready = [root / f"slow-ready-{index}" for index in range(6)]
+                slow = [b.start(f'trap "" TERM; touch {shlex.quote(str(path))}; '
+                                'while :; do sleep .1; done',
+                                cwd=str(root), environment_names=("PATH",)) for path in ready]
+                wait_for(lambda: all(path.exists() for path in ready))
                 b.stop()
                 assert b.settled()
+                from tools.environments.job_supervision import JobState
+                assert all(b.inspect(owned) is JobState.SETTLED for owned in slow)
+                with pytest.raises(SupervisionError, match="sealed"):
+                    b.start("touch late-after-stop", cwd=str(root), environment_names=("PATH",))
+                assert not (root / "late-after-stop").exists()
             finally:
                 a.stop()
                 b.stop()
                 server.shutdown()
                 thread.join()
                 authority.close()
+
+
+@pytest.mark.platforms("linux")
+def test_authority_rejects_writable_socket_parent(tmp_path):
+    from tools.environments.filesystem_authority_server import AuthorityServer
+
+    for mode in (0o770, 0o777, 0o1777):
+        parent = tmp_path / f"socket-{mode:o}"
+        parent.mkdir()
+        parent.chmod(mode)
+        with pytest.raises(PermissionError):
+            with AuthorityServer(str(parent / "control"), None):
+                pass
+        assert not (parent / "control").exists()
+        private = parent / "private"
+        private.mkdir(mode=0o700)
+        if mode == 0o1777 and os.geteuid() == 0:
+            # A protected service-owned child below root's sticky /tmp is safe;
+            # a socket directly in the shared sticky directory is not.
+            with AuthorityServer(str(private / "control"), None):
+                assert (private / "control").is_socket()
+        else:
+            with pytest.raises(PermissionError):
+                with AuthorityServer(str(private / "control"), None):
+                    pass
+            assert not (private / "control").exists()
+    protected = tmp_path / "protected"
+    protected.mkdir(mode=0o700)
+    alias = tmp_path / "alias"
+    alias.symlink_to(protected, target_is_directory=True)
+    with pytest.raises(OSError):
+        with AuthorityServer(str(alias / "control"), None):
+            pass
+    assert not (protected / "control").exists()

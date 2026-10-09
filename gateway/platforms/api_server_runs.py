@@ -673,6 +673,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         body = await request.json()
     except Exception:
         return _json_error(_openai_error, "Invalid JSON", status=400)
+    if not isinstance(body, dict):
+        return _json_error(_openai_error, "JSON body must be an object", status=400)
     body, room_error = await self._normalize_room_dispatch(request, body)
     if room_error is not None:
         return room_error
@@ -1061,7 +1063,14 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 current = self._set_run_status(run_id, "running", supervision_ready=True)
                 # Strict runs cannot launch tools unless recovery authority made
                 # it to durable storage. Do not use best-effort persistence here.
+                # A Stop keeps status=stopping, but still needs recovery of the
+                # supervisor that finished preparing after cancellation arrived.
+                current["supervision_ready"] = True
                 self._run_idempotency_store.update_status(run_id, current)
+                if run_id in self._stopping_run_ids or run_id in self._shutdown_interrupted_run_ids:
+                    await settle_failed_run(run)
+                    _finish("cancelled")
+                    return
             with bind_job_supervision(run.job_lifetime.binding if run.job_lifetime is not None else None):
                 agent = self._create_agent(
                     stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
@@ -1133,6 +1142,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         _retire_live_run(self, run_id)
         self._run_job_lifetimes.pop(run_id, None)
         if run.job_lifetime is not None:
+            from gateway.platforms.api_server_job_lifetime import cleanup_job_payloads
+
+            await cleanup_job_payloads(self, run_id, run.job_lifetime)
             run.job_lifetime.close()
 
 

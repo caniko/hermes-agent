@@ -145,28 +145,39 @@ class FilesystemAuthority:
         return [JobReceipt(item[0]) for item in self.store.db.execute(query, (row["id"],))]
 
     def _retire_job(self, row, job, supervisor, *, observed_exit_code=None):
-        recorded = self.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=? AND claim=?",
-                                        (job.id, row["id"])).fetchone()
-        if recorded["settled"]:
-            return recorded["exit_code"]
-        code = recorded["exit_code"] if recorded["exit_code"] is not None else observed_exit_code
-        if code is None:
-            try:
-                code = supervisor.main_exit_code(job)
-            except SupervisionError:
-                # A reboot, incomplete submission, or lost exit observation must
-                # not prevent fencing and stopping the immutable job intent. The
-                # stop proof below, never a missing exit code, settles ownership.
-                code = None
-        # Keep the observed exit code if the stop acknowledgement is lost. Only
-        # the verified stop/fence permits a durable settlement receipt.
+        return self._retire_jobs(row, [job], supervisor,
+                                 observed_exit_codes={job.id: observed_exit_code})[job.id]
+
+    def _retire_jobs(self, row, jobs, supervisor, *, observed_exit_codes=None):
+        codes, pending = {}, []
+        for job in jobs:
+            recorded = self.store.db.execute("SELECT exit_code,settled FROM jobs WHERE id=? AND claim=?",
+                                            (job.id, row["id"])).fetchone()
+            code = recorded["exit_code"]
+            if not recorded["settled"]:
+                if code is None:
+                    code = (observed_exit_codes or {}).get(job.id)
+                if code is None:
+                    try:
+                        code = supervisor.main_exit_code(job)
+                    except SupervisionError:
+                        # Missing exit evidence is never proof of settlement.
+                        code = None
+                pending.append(job)
+                # Preserve foreground evidence BEFORE the batched Stop can
+                # collect units, including when its acknowledgement is lost.
+                with self.store.transaction():
+                    self.store.db.execute("UPDATE jobs SET exit_code=coalesce(exit_code,?) WHERE id=?",
+                                          (code if code is not None else -15, job.id))
+            codes[job.id] = code if code is not None else -15
+        if not pending:
+            return codes
+        supervisor.stop_jobs(pending)
+        # The supervisor fences and proves each target cgroup empty before any
+        # ledger row settles; all units share one concurrent grace period.
         with self.store.transaction():
-            self.store.db.execute("UPDATE jobs SET exit_code=coalesce(exit_code,?) WHERE id=?",
-                                  (code if code is not None else -15, job.id))
-        supervisor.stop_job(job)
-        with self.store.transaction():
-            self.store.db.execute("UPDATE jobs SET settled=1 WHERE id=?", (job.id,))
-        return code if code is not None else -15
+            self.store.db.executemany("UPDATE jobs SET settled=1 WHERE id=?", ((job.id,) for job in pending))
+        return codes
 
     def _seal(self, row, *, stop=False):
         # Fence the execution host BEFORE recording a sealed ledger state. A
@@ -214,9 +225,17 @@ class FilesystemAuthority:
         self._admissions.discard(row["id"])
         for fd in self._root_fds.pop(row["id"], []):
             os.close(fd)
+        # Settlement commits before destructive housekeeping. The provider also
+        # requires the retained target fence and positive per-job empty proof.
+        if self.store.get(row["principal"], row["request"])["state"] != "settled":
+            raise SupervisionError("durable ownership release is unavailable")
+        if self._jobs(row):
+            self._supervisor(row, prepare=False).cleanup_payloads()
 
     def _settle(self, row, *, stop=False, release=False):
         if row["state"] == "settled":
+            if release:
+                self._release(row)  # Retry cleanup after a lost reply or restart.
             return True
         if row["state"] not in ("sealed", "stopping"):
             return False
@@ -228,9 +247,8 @@ class FilesystemAuthority:
             return True
         supervisor = self._supervisor(row, prepare=False)
         supervisor.seal()
-        for job in jobs:
-            if stop or supervisor.inspect(job) is JobState.SETTLED:
-                self._retire_job(row, job, supervisor)
+        retiring = jobs if stop else [job for job in jobs if supervisor.inspect(job) is JobState.SETTLED]
+        self._retire_jobs(row, retiring, supervisor)
         if self._jobs(row, unsettled=True):
             return False
         if release:

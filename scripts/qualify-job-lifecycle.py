@@ -26,6 +26,21 @@ REQUIRED = {
     "test_stop_admission_fences_delayed_requests_after_restart[before_create]",
     "test_stop_admission_fences_delayed_requests_after_restart[during_admission]",
     "test_system_provider_preserves_uid_and_confines_same_uid_workers",
+    "test_system_provider_launches_guardian_from_copied_virtualenv",
+    "test_authority_client_rejects_foreign_server_before_sending_payload",
+    "test_authority_rejects_writable_socket_parent",
+    "test_runs_reject_non_object_json_before_admission",
+    "test_stop_during_supervisor_preparation_cannot_construct_an_agent[local]",
+    "test_stop_during_supervisor_preparation_cannot_construct_an_agent[ssh]",
+    "test_supervised_local_command_ignores_non_identifier_inherited_environment[local]",
+    "test_supervisor_uses_authenticated_socket_over_local_and_ssh[local]",
+    "test_supervisor_uses_authenticated_socket_over_local_and_ssh[ssh]",
+    "test_run_remains_owned_until_jobs_settle_and_stop_fences_them[terminal-local]",
+    "test_run_remains_owned_until_jobs_settle_and_stop_fences_them[terminal-ssh]",
+    "test_run_remains_owned_until_jobs_settle_and_stop_fences_them[execute_code-local]",
+    "test_run_remains_owned_until_jobs_settle_and_stop_fences_them[execute_code-ssh]",
+    "test_run_remains_owned_until_jobs_settle_and_stop_fences_them[execute_code_active-local]",
+    "test_run_remains_owned_until_jobs_settle_and_stop_fences_them[execute_code_active-ssh]",
 }
 
 DIAGNOSTIC_MARKER = "HERMES_LIFECYCLE_DIAGNOSTIC_V1 "

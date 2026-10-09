@@ -11,7 +11,10 @@ import posixpath
 import re
 import shlex
 import subprocess
+import sys
+import sysconfig
 import uuid
+from pathlib import Path
 from typing import Callable
 
 from tools.environments.job_supervision import JobReceipt, JobState, SupervisionError
@@ -81,8 +84,10 @@ class SystemdJobSupervisor:
               job_id: str | None = None) -> JobReceipt:
         if not posixpath.isabs(cwd) or "\0" in cwd:
             raise ValueError("job cwd must be absolute")
-        if any(not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", name) for name in environment_names):
-            raise ValueError("invalid environment name")
+        # Inherited Linux environments can contain Bash-exported function keys,
+        # which cannot be reproduced with a Bash variable declaration.
+        environment_names = tuple(name for name in environment_names
+                                  if re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", name))
         job = JobReceipt(job_id or uuid.uuid4().hex)
         folder, unit = self._job(job)
         root, dest = shlex.quote(self.state_dir), shlex.quote(folder)
@@ -90,10 +95,29 @@ class SystemdJobSupervisor:
         # lock as seal/stop. A lost SSH acknowledgement leaves a discoverable job.
         # RemainAfterExit retains successful receipts until explicit stop; ExitType
         # keeps the job running when only daemonized descendants remain (systemd 250+).
+        guardian = self.execution_user is not None and "PrivatePIDs=yes" in self.properties
+        guardian_python = str(Path(sys._base_executable).resolve(strict=True)) if guardian else None
         properties = ["ExitType=cgroup", "RemainAfterExit=yes", "KillMode=mixed", "TimeoutStopSec=5s",
                       "StandardOutput=append:" + folder + "/output",
-                      "StandardError=inherit", "StandardInput=file:" + folder + "/input"]
+                      "StandardError=append:" + folder + "/foreground-exit" if guardian else "StandardError=inherit",
+                      "StandardInput=file:" + folder + "/input"]
         properties.extend(self.properties)
+        if guardian:
+            # Use the trusted base interpreter, never a host-only virtualenv.
+            # Expose only its executable/stdlib/shared library, not its enclosing
+            # installation prefix or home. Workload env is loaded after PID1.
+            runtime_paths = {guardian_python, sysconfig.get_path("stdlib"),
+                             sysconfig.get_path("platstdlib")}
+            if sysconfig.get_config_var("Py_ENABLE_SHARED"):
+                for variable in ("LDLIBRARY", "INSTSONAME"):
+                    name = sysconfig.get_config_var(variable)
+                    if name:
+                        runtime_paths.add(str(Path(sysconfig.get_config_var("LIBDIR")) / name))
+            for path in sorted(runtime_paths):
+                source_path = str(Path(path).resolve(strict=True))
+                if any(character in source_path + path for character in (":", "\n")):
+                    raise ValueError("guardian runtime path cannot contain colon or newline")
+                properties += [f"BindReadOnlyPaths={quote_systemd_path(source_path)}:{quote_systemd_path(path)}"]
         fence = self.state_dir + "/fence"
         if self.execution_user is not None:
             if ":" in fence or "\n" in fence:
@@ -137,7 +161,11 @@ class SystemdJobSupervisor:
             f"printf '%s' {shlex.quote(command)} > {dest}/command; "
             f"{environment_script} > {dest}/environment; "
             f"{shlex.join(argv)} -- \"$(command -v bash)\" --noprofile --norc -ec "
-            + shlex.quote('exec "$1" -i "$2" --noprofile --norc -ec "$3" job "$2" "${CREDENTIALS_DIRECTORY:-}" "$4" "$5" "$6"')
+            + shlex.quote('exec "$1" -i ' + (
+                shlex.join([guardian_python, "-I", "-S", "-c",
+                            Path(__file__).with_name("systemd_job_init.py").read_text(encoding="utf-8-sig")]) + " "
+                if guardian else "")
+                + '"$2" --noprofile --norc -ec "$3" job "$2" "${CREDENTIALS_DIRECTORY:-}" "$4" "$5" "$6"')
             + f" launcher \"$(command -v env)\" \"$(command -v bash)\" {shlex.quote(launch)} \"$(command -v flock)\" \"$(command -v cmp)\" \"$(command -v stat)\"; "
             f"touch {dest}/accepted")
         self._run(self._gate(script), stdin)
@@ -223,7 +251,9 @@ class SystemdJobSupervisor:
             f'if test "$state" != unknown; then fields=$(systemctl {self._manager} show {unit} '
             "-p LoadState -p ExecMainCode -p ExecMainStatus) || "
             '{ case "$fields" in *LoadState=not-found*) ;; *) exit 1;; esac; }; '
-            'printf "%s\\n" "$fields"; fi; '
+            'printf "%s\\n" "$fields"; '
+            f"if test -s {shlex.quote(folder + '/foreground-exit')}; then "
+            f"printf 'ForegroundExitStatus='; cat -- {shlex.quote(folder + '/foreground-exit')}; fi; fi; "
             "echo __HERMES_OUTPUT__; set -o pipefail; "
             f"dd if={shlex.quote(folder + '/output')} iflag=skip_bytes,count_bytes "
             f"skip={offset} count=65536 status=none | base64")
@@ -237,37 +267,52 @@ class SystemdJobSupervisor:
                 if fields.get("LoadState") == "not-found":
                     if fence != "stopped" or state is not JobState.SETTLED:
                         raise SupervisionError("target job exit status is unavailable")
-                    code = -15
+                    code = int(fields["ForegroundExitStatus"]) if "ForegroundExitStatus" in fields else -15
                 else:
                     reason, status = int(fields["ExecMainCode"]), int(fields["ExecMainStatus"])
-                    code = None if reason == 0 else status if reason == 1 else -status
+                    code = (int(fields["ForegroundExitStatus"]) if "ForegroundExitStatus" in fields else
+                            None if reason == 0 else status if reason == 1 else -status)
             return state, code, base64.b64decode("".join(output.splitlines()), validate=True)
         except (KeyError, ValueError) as exc:
             raise SupervisionError("target job observation is unavailable") from exc
 
     def main_exit_code(self, job: JobReceipt) -> int | None:
-        _, unit = self._job(job)
+        folder, unit = self._job(job)
         try:
             fields = dict(line.split("=", 1) for line in self._run(
-                f"systemctl {self._manager} show {unit} -p LoadState -p ExecMainCode -p ExecMainStatus").splitlines())
+                f"systemctl {self._manager} show {unit} -p LoadState -p ExecMainCode -p ExecMainStatus; "
+                f"if test -s {shlex.quote(folder + '/foreground-exit')}; then "
+                f"printf 'ForegroundExitStatus='; cat -- {shlex.quote(folder + '/foreground-exit')}; fi").splitlines())
         except SupervisionError:
             fields = {}
+        except ValueError as exc:
+            raise SupervisionError("target job foreground exit status is unavailable") from exc
         # show can succeed after collection while exit properties have reverted
         # to zero. Complete a retained handle only from the same durable Stop
         # and empty-cgroup proof used when the manager rejects the lookup.
         if not fields or fields.get("LoadState") == "not-found":
             self._run(f"test -f {shlex.quote(self.state_dir + '/fence/' + job.id + '.stopped')}")
             if self.inspect(job) is JobState.SETTLED:
-                return -15
+                try:
+                    return int(fields["ForegroundExitStatus"]) if "ForegroundExitStatus" in fields else -15
+                except ValueError as exc:
+                    raise SupervisionError("target job foreground exit status is unavailable") from exc
             raise SupervisionError("target job exit status is unavailable")
         if not {"ExecMainCode", "ExecMainStatus"} <= fields.keys():
             raise SupervisionError("target job exit status is unavailable")
+        if "ForegroundExitStatus" in fields:
+            try:
+                return int(fields["ForegroundExitStatus"])
+            except ValueError as exc:
+                raise SupervisionError("target job foreground exit status is unavailable") from exc
         code, status = int(fields["ExecMainCode"]), int(fields["ExecMainStatus"])
         return None if code == 0 else status if code == 1 else -status
 
     def exit_code(self, job: JobReceipt) -> int:
-        _, unit = self._job(job)
-        return int(self._run(f"systemctl {self._manager} show {unit} -p ExecMainStatus --value").strip())
+        code = self.main_exit_code(job)
+        if code is None:
+            raise SupervisionError("target job foreground has not exited")
+        return code
 
     def seal(self) -> None:
         root = shlex.quote(self.state_dir)
@@ -275,12 +320,12 @@ class SystemdJobSupervisor:
 
     def stop(self) -> None:
         self.seal()
-        self._stop_jobs(self.jobs())
+        self.stop_jobs(self.jobs())
 
     def stop_job(self, job: JobReceipt) -> None:
-        self._stop_jobs([job])
+        self.stop_jobs([job])
 
-    def _stop_jobs(self, jobs: list[JobReceipt]) -> None:
+    def stop_jobs(self, jobs: list[JobReceipt]) -> None:
         if not jobs:
             return
         folders, units = zip(*(self._job(job) for job in jobs))
@@ -335,3 +380,15 @@ class SystemdJobSupervisor:
             return self._all_settled(self.jobs())
         except SupervisionError:
             return False
+
+    def cleanup_payloads(self) -> None:
+        # Call only after terminal persistence. Keep receipt directories and the
+        # fence so recovery and delayed submissions still see durable Stop proof.
+        if not self.settled():
+            raise SupervisionError("target jobs must settle before payload cleanup")
+        root = shlex.quote(self.state_dir)
+        self._run(self._gate(
+            f"test -f {root}/fence/sealed; "
+            f"for job in {root}/job-*; do test -d \"$job\" || continue; "
+            'rm -f -- "$job/input" "$job/command" "$job/environment" "$job/output"; done; '
+            f"rm -rf -- {root}/kernel-*"))

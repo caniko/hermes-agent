@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import venv
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -30,6 +31,55 @@ def wait_for(predicate):
         if time.monotonic() >= deadline:
             pytest.fail("system-provider receipt did not settle")
         time.sleep(.1)
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires explicit operator authorization for the system provider")
+def test_system_provider_launches_guardian_from_copied_virtualenv(tmp_path):
+    runtime = tmp_path / "private-runtime"
+    venv.EnvBuilder(symlinks=False).create(runtime)
+    interpreter = runtime / "bin/python"
+    assert not interpreter.is_symlink()
+    assert interpreter.resolve().is_relative_to(tmp_path)
+    # Keep imports tied to the built candidate, not the editable source. The
+    # authority actually runs from a copied, non-standard interpreter path.
+    script = (f"import sys; sys.path[:] = {sys.path!r}; "
+              "from tests.tools.test_filesystem_authority_system import "
+              "test_system_provider_preserves_uid_and_confines_same_uid_workers as check; check()")
+    result = subprocess.run([str(interpreter), "-c", script], capture_output=True, text=True,
+                            timeout=180)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires explicit operator authorization for the system provider")
+def test_authority_client_rejects_foreign_server_before_sending_payload(tmp_path):
+    from tools.environments.filesystem_authority_server import request
+
+    tmp_path.chmod(0o711)
+    socket_path = tmp_path / "foreign-control"
+    # A root-owned socket inode does not prove the listener's identity. Bind as
+    # root, then listen as the workload UID, leaving the pathname protected.
+    script = ("import os,socket,sys; s=socket.socket(socket.AF_UNIX); "
+              "s.bind(sys.argv[1]); os.chmod(sys.argv[1], 0o666); "
+              "os.setuid(int(sys.argv[2])); s.listen(1); print('ready', flush=True); "
+              "c,_=s.accept(); payload=c.recv(4096); "
+              "print('leaked' if payload else 'protected', flush=True); "
+              "c.sendall(b'{\"ok\":true,\"result\":{}}\\n') if payload else None")
+    process = subprocess.Popen([sys.executable, "-c", script, str(socket_path),
+                                str(pwd.getpwnam("nobody").pw_uid)],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        with pytest.raises(PermissionError):
+            request(str(socket_path), {"command": "private payload"})
+        output, error = process.communicate(timeout=10)
+        assert process.returncode == 0, error
+        assert output.strip() == "protected"
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
 
 
 @pytest.mark.platforms("linux")
@@ -71,7 +121,9 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
         )
         def client(uid):
             def call(payload):
-                return subprocess.run([sys.executable, "-c", script, socket_path], input=payload,
+                # Controllers need a traversable interpreter independently of
+                # the authority's private virtualenv.
+                return subprocess.run([sys._base_executable, "-c", script, socket_path], input=payload,
                     env=env, text=True, capture_output=True, timeout=40,
                     user=uid, group=workload.pw_gid, extra_groups=[])
             return call
@@ -94,12 +146,16 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
                     'printf cached > "$CARGO_TARGET_DIR/artifact"', cwd=str(maintained), environment_names=())
                 wait_for(lambda: a.main_exit_code(job) is not None)
                 assert a.exit_code(job) == 0, a.output(job)
+                # The foreground receipt can precede PID1's final orphan reap
+                # and manager cgroup settlement. Neither substitutes for the other.
+                wait_for(lambda: a.inspect(job) is JobState.SETTLED)
                 assert a.inspect(job) is JobState.SETTLED
                 assert (maintained / "maintained").stat().st_uid == workload.pw_uid
                 assert (maintained / "maintained").stat().st_gid == workload.pw_gid
                 assert a.output(job) == a.runtime_dir + "/home"
                 assert not (maintained / ".hermes").exists()
-                probe = a.start(f"! cat -- {shlex.quote(str(sibling))} && ! cat -- {shlex.quote(str(credentials))} && printf scoped",
+                probe = a.start(f"! cat -- /proc/1/fd/2 && ! cat -- {shlex.quote(str(sibling))} "
+                    f"&& ! cat -- {shlex.quote(str(credentials))} && printf scoped",
                     cwd=str(maintained), environment_names=())
                 wait_for(lambda: a.main_exit_code(probe) is not None)
                 assert a.exit_code(probe) == 0, a.output(probe)
@@ -113,6 +169,24 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
                 assert other.exit_code(isolated) == 0, other.output(isolated)
                 assert other.output(isolated).endswith("isolated")
                 assert not (roots[0] / "ungranted").exists()
+                # Retain the detached writer after its PID-namespace leader exits.
+                ready, release, finished = (maintained / name for name in
+                                            ("daemon-ready", "daemon-release", "daemon-finished"))
+                child = (f"touch {shlex.quote(str(ready))}; "
+                         f"while test ! -e {shlex.quote(str(release))}; do sleep .05; done; "
+                         f"printf finished > {shlex.quote(str(finished))}")
+                daemon = a.start(
+                    f"setsid bash -c {shlex.quote(child)} </dev/null >/dev/null 2>&1 & "
+                    f"while test ! -e {shlex.quote(str(ready))}; do sleep .05; done",
+                    cwd=str(maintained), environment_names=())
+                wait_for(lambda: a.main_exit_code(daemon) is not None)
+                assert a.main_exit_code(daemon) == 0  # Foreground exit precedes descendant settlement.
+                assert ready.exists()
+                assert a.inspect(daemon) is JobState.RUNNING
+                assert not finished.exists()
+                release.touch()
+                wait_for(lambda: a.inspect(daemon) is JobState.SETTLED)
+                assert finished.read_text() == "finished"
                 a.seal()
                 assert a.settled()
                 with pytest.raises(OwnershipPending):
@@ -160,10 +234,12 @@ def test_system_provider_preserves_uid_and_confines_same_uid_workers():
                     b.start("touch late", cwd=str(maintained), environment_names=())
                 assert not (maintained / "late").exists()
             finally:
-                for owned in (a, b, other):
-                    owned.stop()
-                    assert owned.settled()
-                    assert owned.release()["state"] == "settled"
-                server.shutdown()
-                thread.join()
-                authority.close()
+                try:
+                    for owned in (a, b, other):
+                        owned.stop()
+                        assert owned.settled()
+                        assert owned.release()["state"] == "settled"
+                finally:
+                    server.shutdown()
+                    thread.join()
+                    authority.close()
