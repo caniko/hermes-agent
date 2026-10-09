@@ -87,7 +87,9 @@ def test_systemd_mount_properties_reach_manager_with_exact_paths(tmp_path, targe
                    for source, destination, *_ in property_value("BindReadOnlyPaths"))
         readonly = property_value("BindReadOnlyPaths")
         executable = str(Path(sys._base_executable).resolve(strict=True))
-        for path in (executable, sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib")):
+        base_vars = {"base": sys.base_prefix, "platbase": sys.base_exec_prefix}
+        for path in (executable, sysconfig.get_path("stdlib", vars=base_vars),
+                     sysconfig.get_path("platstdlib", vars=base_vars)):
             assert any(source == str(Path(path).resolve(strict=True)) and destination == path
                        for source, destination, *_ in readonly)
     finally:

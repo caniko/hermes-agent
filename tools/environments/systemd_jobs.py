@@ -106,8 +106,9 @@ class SystemdJobSupervisor:
             # Use the trusted base interpreter, never a host-only virtualenv.
             # Expose only its executable/stdlib/shared library, not its enclosing
             # installation prefix or home. Workload env is loaded after PID1.
-            runtime_paths = {guardian_python, sysconfig.get_path("stdlib"),
-                             sysconfig.get_path("platstdlib")}
+            base_vars = {"base": sys.base_prefix, "platbase": sys.base_exec_prefix}
+            runtime_paths = {guardian_python, sysconfig.get_path("stdlib", vars=base_vars),
+                             sysconfig.get_path("platstdlib", vars=base_vars)}
             if sysconfig.get_config_var("Py_ENABLE_SHARED"):
                 for variable in ("LDLIBRARY", "INSTSONAME"):
                     name = sysconfig.get_config_var(variable)
