@@ -4374,8 +4374,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
         return _api_runs._make_run_event_callback(self, run_id, loop, _api_server=sys.modules[__name__])
 
-    def _run_idempotency_scope(self, request: "web.Request") -> str:
-        return _api_runs._run_idempotency_scope(self, request, _api_server=sys.modules[__name__])
+    def _run_idempotency_scope(self, request: "web.Request", *, execution_context=None, run_id=None,
+                             idempotency_key="") -> str:
+        return _api_runs._run_idempotency_scope(
+            self, request, execution_context=execution_context, run_id=run_id,
+            idempotency_key=idempotency_key, _api_server=sys.modules[__name__])
 
     @staticmethod
     def _room_grant_token(request: "web.Request") -> str:

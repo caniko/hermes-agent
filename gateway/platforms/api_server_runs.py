@@ -402,7 +402,8 @@ def _room_permission_for(request: "web.Request") -> str:
     return "status" if request.method == "GET" else "dispatch"
 
 
-def _run_idempotency_scope(self, request: "web.Request", *, _api_server) -> str:
+def _run_idempotency_scope(self, request: "web.Request", *, execution_context=None, run_id=None,
+                           idempotency_key="", _api_server) -> str:
     """Opaque auth/profile namespace; never persist bearer credentials."""
     if self._room_grant_token(request):
         claims = self._room_grant_claims(request, permission=_room_permission_for(request))
@@ -417,10 +418,28 @@ def _run_idempotency_scope(self, request: "web.Request", *, _api_server) -> str:
         profile = _api_server._api_request_profile.get()
         with self._profile_scope(profile):
             authority = worker_authority(_get_env_config())
-        # API key rotation must not strand runs admitted under the same enrolled
-        # control principal. Authentication is still checked on every request.
-        parts = (profile or "default", "filesystem-authority", authority["authority"], authority["principal"]) if authority else (
-            profile or "default", self._expected_api_key() or "unauthenticated-test-listener")
+        parts = (profile or "default", self._expected_api_key() or "unauthenticated-test-listener")
+        scope = hashlib.sha256("\0".join(map(str, parts)).encode()).hexdigest()
+        if authority:
+            authority_scope = hashlib.sha256("\0".join(map(str, (
+                profile or "default", "filesystem-authority", authority["authority"], authority["principal"]))).encode()).hexdigest()
+            if run_id is not None:
+                status = self._run_statuses.get(run_id)
+                if status is None:
+                    record = _run_idempotency_store_for(self).status_for_run(authority_scope, run_id)
+                    status = record["status"] if record else None
+                execution_context = (status or {}).get("execution_context")
+            # Only ownership runs survive API-key rotation under their enrolled
+            # principal. Ordinary requests remain credential-scoped regardless
+            # of authority enable/replace/disable; never look up an unscoped key.
+            if isinstance(execution_context, dict) and execution_context.get("ownership"):
+                return authority_scope
+            if idempotency_key or run_id is not None:
+                scope = _run_idempotency_store_for(self).migrate_ordinary_scope(
+                    authority_scope, scope, key=idempotency_key, run_id=run_id or "")
+            if run_id is not None and self._run_owners.get(run_id) == authority_scope and scope != authority_scope:
+                self._run_owners[run_id] = scope
+        return scope
     return hashlib.sha256("\0".join(map(str, parts)).encode()).hexdigest()
 
 
@@ -453,10 +472,10 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
         and run_id not in self._active_run_tasks
     ):
         if run_id in self._run_idempotency_ids:
-            scope = self._run_idempotency_scope(request)
+            scope = self._run_idempotency_scope(request, run_id=run_id)
             _run_idempotency_store_for(self).extend_retention(scope, run_id, _room_retention_until(request))
         return status
-    scope = self._run_idempotency_scope(request)
+    scope = self._run_idempotency_scope(request, run_id=run_id)
     store = _run_idempotency_store_for(self)
     record = store.status_for_run(
         scope, run_id, retention_until=_room_retention_until(request))
@@ -721,7 +740,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
             code="invalid_idempotency_key", status=400)
     idempotency_scope = ""
     if idempotency_key:
-        idempotency_scope = self._run_idempotency_scope(request)
+        idempotency_scope = self._run_idempotency_scope(
+            request, execution_context=body.get("execution_context"), idempotency_key=idempotency_key)
     raw_input = body.get("input")
     if not raw_input:
         return _json_error(_openai_error, "Missing 'input' field", status=400)
@@ -818,7 +838,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     session_history_delivery = execution_context is None and not previous_response_id and not conversation_history
     if not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
-    self._run_owners[run_id] = self._run_idempotency_scope(request)
+    self._run_owners[run_id] = idempotency_scope or self._run_idempotency_scope(
+        request, execution_context=body.get("execution_context"))
     q = self._run_streams[run_id] = _RunStream()
     created_at = self._run_streams_created[run_id] = time.time()
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
@@ -1214,7 +1235,7 @@ def _release_run_owner_if_forgotten(self, run_id: str) -> None:
 
 
 def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
-    scope = self._run_idempotency_scope(request)
+    scope = self._run_idempotency_scope(request, run_id=run_id)
     owner = self._run_owners.get(run_id)
     if owner is not None:
         return owner == scope

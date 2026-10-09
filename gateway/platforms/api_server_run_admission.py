@@ -32,7 +32,7 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
     except (ValueError, TypeError) as exc:
         return _json_error(api._openai_error, str(exc), code="invalid_run_admission_stop", status=400)
 
-    scope = adapter._run_idempotency_scope(request)
+    scope = adapter._run_idempotency_scope(request, execution_context=context, idempotency_key=key)
     now = time.time()
     run_id = f"run_{uuid.uuid4().hex}"
     cancelled = {"object": "hermes.run", "run_id": run_id, "status": "cancelled",

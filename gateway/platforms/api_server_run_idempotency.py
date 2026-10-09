@@ -202,6 +202,30 @@ class RunIdempotencyStore:
                 self._conn.execute(
                     "DELETE FROM run_idempotency WHERE scope=? AND idempotency_key=?", (stale_scope, stale_key))
 
+    def migrate_ordinary_scope(self, legacy_scope: str, scope: str, *, key: str = "", run_id: str = "") -> str:
+        """Rebind only an exact authorized legacy ordinary row, never ownership receipts."""
+        if not key and not run_id:
+            return scope
+        with self._immediate_txn():
+            self._prune_stale_terminal_locked(time.time())
+            row = self._conn.execute(
+                "SELECT idempotency_key, status_json FROM run_idempotency WHERE scope=? AND "
+                + ("run_id=?" if run_id else "idempotency_key=?"),
+                (legacy_scope, run_id or key)).fetchone()
+            if row is not None and not (json.loads(row[1]).get("execution_context") or {}).get("ownership"):
+                # Keep both receipts if an older version already created a duplicate.
+                # Run-ID controls still address that exact legacy row; keyed replay
+                # uses the credential row rather than erasing either execution.
+                existing = self._conn.execute(_SELECT_BY_KEY, (scope, row[0])).fetchone()
+                if existing is None:
+                    self._conn.execute(
+                        "UPDATE run_idempotency SET scope=? WHERE scope=? AND idempotency_key=?",
+                        (scope, legacy_scope, row[0]))
+                elif run_id:
+                    scope = legacy_scope
+            self._conn.commit()
+        return scope
+
     def status_for_run(self, scope: str, run_id: str, *, retention_until: float = 0) -> dict[str, Any] | None:
         """Load one durable run status inside its authenticated scope."""
         retention_until = max(0.0, float(retention_until or 0))

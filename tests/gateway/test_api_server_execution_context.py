@@ -80,6 +80,9 @@ async def test_idempotency_follows_served_home_across_multiplex_and_standalone_r
             return await handler(request)
     app = web.Application(middlewares=[routed])
     app.router.add_post("/v1/runs", adapter._handle_runs)
+    app.router.add_get("/v1/runs/{run_id}", adapter._handle_run_status)
+    app.router.add_get("/v1/runs/{run_id}/events", adapter._handle_run_events)
+    app.router.add_post("/v1/runs/{run_id}/stop", adapter._handle_run_stop)
     run_ids = {}
     headers = {"Authorization": "Bearer fixture-key", "Idempotency-Key": "same-key"}
     restarted = None
@@ -108,6 +111,62 @@ async def test_idempotency_follows_served_home_across_multiplex_and_standalone_r
                 assert (await replay.json())["run_id"] == run_ids["a"]
                 assert replay.headers["Idempotency-Replayed"] == "true"
                 assert executed == [hermes_home_key(homes["a"]), hermes_home_key(homes["b"])]
+                controls = {**headers, "Test-Profile": "a"}
+                status = await client.get(f"/v1/runs/{run_ids['a']}", headers=controls)
+                assert status.status == 200, await status.text()
+                events = await client.get(f"/v1/runs/{run_ids['a']}/events", headers=controls)
+                assert events.status == 200, await events.text()
+                assert "run.completed" in await events.text()
+                stopped = await client.post(f"/v1/runs/{run_ids['a']}/stop", headers=controls)
+                assert stopped.status == 200, await stopped.text()
+            # Upgrade one exact current-authority legacy ordinary row, retaining
+            # its run ID, then replay/control it after enrollment is disabled.
+            import hashlib
+            from gateway.platforms.api_server_run_idempotency import request_identity
+
+            (homes["a"] / "config.yaml").write_text(
+                f"terminal:\n  backend: local\n  cwd: {homes['a']}\n"
+                "  filesystem_authority:\n    authority: legacy-authority\n"
+                "    principal: controller\n    socket: /unused-authority\n    command: ['false']\n")
+            legacy_scope = hashlib.sha256(
+                "default\0filesystem-authority\0legacy-authority\0controller".encode()).hexdigest()
+            with profile_scope(homes["a"]):
+                legacy_store = _run_idempotency_store_for(adapter)
+                key, fingerprint = request_identity({"input": "legacy"}, None, "legacy-key")
+                legacy_store.reserve(legacy_scope, key, fingerprint, "run_legacy", {
+                    "run_id": "run_legacy", "status": "completed", "last_event": "run.completed"})
+                foreign_scope = hashlib.sha256(
+                    "default\0filesystem-authority\0foreign-authority\0controller".encode()).hexdigest()
+                legacy_store.reserve(foreign_scope, "foreign", "digest", "run_foreign", {
+                    "run_id": "run_foreign", "status": "completed"})
+                legacy_store.reserve(legacy_scope, "owned", "digest", "run_owned_legacy", {
+                    "run_id": "run_owned_legacy", "status": "completed",
+                    "execution_context": {"ownership": {"authority": "legacy-authority"}}})
+                credential_scope = adapter._run_idempotency_scope(
+                    SimpleNamespace(headers=headers, method="GET", path="/v1/runs/run_legacy"))
+                assert legacy_store.migrate_ordinary_scope(
+                    legacy_scope, credential_scope, key="owned") == credential_scope
+                assert legacy_store.status_for_run(credential_scope, "run_owned_legacy") is None
+                assert legacy_store.status_for_run(legacy_scope, "run_owned_legacy") is not None
+            for enrolled in (True, False):
+                if not enrolled:
+                    (homes["a"] / "config.yaml").write_text(
+                        f"terminal:\n  backend: local\n  cwd: {homes['a']}\n")
+                controls = {**headers, "Test-Profile": "a", "Idempotency-Key": key}
+                replay = await client.post("/v1/runs", headers=controls, json={"input": "legacy"})
+                assert replay.status == 202, await replay.text()
+                assert (await replay.json())["run_id"] == "run_legacy"
+                assert replay.headers["Idempotency-Replayed"] == "true"
+                status = await client.get("/v1/runs/run_legacy", headers=controls)
+                assert status.status == 200, await status.text()
+                forbidden = await client.get("/v1/runs/run_foreign", headers=controls)
+                assert forbidden.status == 404, await forbidden.text()
+                assert executed == [hermes_home_key(homes["a"]), hermes_home_key(homes["b"])]
+            adapter._api_key = "rotated-key"
+            denied = await client.get("/v1/runs/run_legacy", headers={
+                **controls, "Authorization": "Bearer rotated-key"})
+            assert denied.status == 404, await denied.text()
+            adapter._api_key = "fixture-key"
         assert run_ids["a"] != run_ids["b"]
         assert executed == [hermes_home_key(homes["a"]), hermes_home_key(homes["b"])]
         with profile_scope(homes["b"]):
