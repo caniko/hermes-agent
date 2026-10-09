@@ -26,7 +26,7 @@ def test_profile_worker_homes_sync_and_execute_independently(tmp_path, monkeypat
     personal = login_home / ".hermes"
     personal.mkdir(parents=True)
     sentinel = personal / "personal.txt"
-    sentinel.write_text("personal")
+    sentinel.write_text("personal", encoding="utf-8")
     workspace = tmp_path / "data"
     workspace.mkdir()
     bash = shutil.which("bash")
@@ -55,7 +55,7 @@ def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
         profile.mkdir()
         skill = profile / "skills" / "example" / "SKILL.md"
         skill.parent.mkdir(parents=True)
-        skill.write_text(f"skill-{name}")
+        skill.write_text(f"skill-{name}", encoding="utf-8")
         (skill.parent / "usage\nnotes.txt").write_text(f"profile-{name}", encoding="utf-8")
         remote = tmp_path / f"worker '{name}'"
         (remote / "skills" / "example").mkdir(parents=True)
@@ -65,7 +65,7 @@ def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
         (profile / "config.yaml").write_text(
             f"terminal:\n  backend: ssh\n  ssh_host: {target['host']}\n  ssh_user: {target['user']}\n"
             f"  ssh_port: {target['port']}\n  ssh_key: {target['key']}\n"
-            f"  ssh_hermes_home: {remote}\n  cwd: {workspace}\n")
+            f"  ssh_hermes_home: {remote}\n  cwd: {workspace}\n", encoding="utf-8")
         profiles[name] = (profile, remote, skill)
 
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
@@ -80,8 +80,8 @@ def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
                 env = _build_ssh_env(cwd=cfg["cwd"], timeout=10,
                                      ssh_config=_ssh_config_from_config(cfg))
                 try:
-                    assert (remote / "skills/example/SKILL.md").read_text() == skill.read_text()
-                    assert (remote / "skills/example/usage\nnotes.txt").read_text(encoding="utf-8") == f"profile-{name}"
+                    assert (remote / "skills/example/SKILL.md").read_text(encoding="utf-8-sig") == skill.read_text(encoding="utf-8-sig")
+                    assert (remote / "skills/example/usage\nnotes.txt").read_text(encoding="utf-8-sig") == f"profile-{name}"
                     assert all(stat.S_IMODE(directory.stat().st_mode) == mode for directory, mode in modes.items())
                     proc = env._run_bash(
                         'printf "%s\\n" "$HERMES_HOME"; '
@@ -94,11 +94,11 @@ def _exercise_profiles(tmp_path, workspace, target, sentinel, personal):
                 finally:
                     env.cleanup()
                     env._sync_manager = None  # __del__ must not retry after the transport fixture is gone.
-                assert skill.read_text() == f"updated-{name}"
+                assert skill.read_text(encoding="utf-8-sig") == f"updated-{name}"
         finally:
             reset_hermes_home_override(token)
     assert sockets["a"] != sockets["b"]
-    assert sentinel.read_text() == "personal"
+    assert sentinel.read_text(encoding="utf-8-sig") == "personal"
     assert sorted(p.name for p in personal.iterdir()) == ["personal.txt"]
     assert all((workspace / name).stat().st_uid == os.getuid() for name in ("a", "b"))
 

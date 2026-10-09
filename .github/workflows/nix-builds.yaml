@@ -61,7 +61,7 @@ jobs:
         run: python3 scripts/test-qualify-job-lifecycle.py
 
       - name: Project setup 2
-        run: nix run github:caniko/simit/362369c48b214d13340dffc2f858ab641adcd839 -- init ci --platform github --ci-provider actions --runtime nix --check --diff
+        run: nix run github:caniko/simit/bbfef6f6674d9977d7504a0e9c66be39147d9400 -- init ci --platform github --ci-provider actions --runtime nix --check --diff
 
       - name: Build ${{ matrix.installable }}
         env:
@@ -78,13 +78,17 @@ jobs:
       - name: Retain Nix results 1
         run: |
           python3 scripts/qualify-job-lifecycle.py retain
+      - name: Retain Nix diagnostics 1
+        if: always()
+        run: |
+          python3 scripts/qualify-job-lifecycle.py retain-diagnostics
       - name: Upload Nix build evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
 
         with:
           name: nix-build-${{ strategy.job-index }}
-          retention-days: 31
+          retention-days: 32
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/simit-nix-build-${{ strategy.job-index }}

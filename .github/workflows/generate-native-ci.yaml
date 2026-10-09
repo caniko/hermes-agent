@@ -1,0 +1,74 @@
+name: Generate native diagnostic CI
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/generate-native-ci.yaml
+      - simit.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GENERATOR_REVISION: bbfef6f6674d9977d7504a0e9c66be39147d9400
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+      - name: Configure GitHub input transport
+        run: |
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+      - name: Generate with qualified immutable Simit
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/native-ci-generation"
+          git worktree add --detach "$destination" HEAD
+          git rev-parse HEAD > "$destination/source-revision"
+          sha256sum simit.toml > "$destination/source-config.sha256"
+          cd "$destination"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path("simit.toml")
+          text = p.read_text()
+          old = "362369c48b214d13340dffc2f858ab641adcd839"
+          pin = os.environ["GENERATOR_REVISION"]
+          assert text.count(old) == 1 or text.count(pin) == 1
+          text = text.replace(old, pin)
+          field = 'post_build_always = ["python3 scripts/qualify-job-lifecycle.py retain-diagnostics"]'
+          anchor = 'post_build = ["python3 scripts/qualify-job-lifecycle.py retain"]'
+          assert text.count(anchor) == 1
+          if "post_build_always" not in text:
+              text = text.replace(anchor, anchor + "\n" + field)
+          else:
+              assert field in text
+          p.write_text(text)
+          PY
+          nix run "github:caniko/simit/$GENERATOR_REVISION" -- init ci --platform github --ci-provider actions --runtime nix
+          nix run "github:caniko/simit/$GENERATOR_REVISION" -- init ci --platform github --ci-provider actions --runtime nix --check --diff
+          printf '%s\n' "$GENERATOR_REVISION" > generator-revision
+          sha256sum simit.toml .github/workflows/nix-builds.yaml > generated.sha256
+      - name: Retain generated adoption files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-ci-generation-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 32
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            ${{ runner.temp }}/native-ci-generation/simit.toml
+            ${{ runner.temp }}/native-ci-generation/.github/workflows/nix-builds.yaml
+            ${{ runner.temp }}/native-ci-generation/source-revision
+            ${{ runner.temp }}/native-ci-generation/source-config.sha256
+            ${{ runner.temp }}/native-ci-generation/generator-revision
+            ${{ runner.temp }}/native-ci-generation/generated.sha256
