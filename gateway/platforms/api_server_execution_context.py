@@ -23,6 +23,7 @@ class ExecutionContextError(ValueError):
 class ExecutionContext:
     requested: dict
     terminal_policy: dict[str, str]
+    profile_home: str | None = None
 
 
 def validate_execution_context(raw) -> None:
@@ -56,6 +57,7 @@ def validate_execution_context(raw) -> None:
 
 
 def capture_execution_context(raw) -> ExecutionContext:
+    from hermes_constants import hermes_home_key
     from tools.terminal_tool import _get_env_config
 
     validate_execution_context(raw)
@@ -84,7 +86,7 @@ def capture_execution_context(raw) -> ExecutionContext:
     scope = get_terminal_scope()
     policy = dict(scope) if scope is not None else {k: v for k, v in os.environ.items() if k.startswith("TERMINAL_")}
     policy.update(TERMINAL_ENV=backend, TERMINAL_CWD=cwd)
-    return ExecutionContext(actual, policy)
+    return ExecutionContext(actual, policy, hermes_home_key())
 
 
 def verify_execution_directory(context: ExecutionContext) -> None:

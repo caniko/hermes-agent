@@ -539,6 +539,15 @@ With filesystem ownership enabled, kernel code and RPC files use the claim's
 private execution-host runtime directory. Authority control state stays outside
 the workload's filesystem namespace.
 
+Ownership request and fingerprint identities are internally qualified by the
+authenticated profile's canonical home key, captured at admission. Identical
+client identities in another profile cannot reserve, start, inspect, stop or
+release the first profile's claim; API key rotation does not change that scope.
+Durable recovery also checks the recorded profile home. Before upgrading from
+unqualified ownership receipts, explicitly drain and release their claims with
+the enrolled authority controller; legacy receipts without profile provenance
+are not automatically adopted by any profile.
+
 Stop, cancellation, and failed turns fence new launches and terminate admitted
 jobs before publishing a terminal state. A `stopping` acknowledgement only
 confirms that stopping was requested. Loss of the SSH/control channel leaves the

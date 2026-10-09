@@ -17,7 +17,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
-from tests.gateway.test_api_server_execution_context import profile_scope
+from tests.gateway.test_api_server_execution_context import multiplex, profile_scope
 from tests.tools.test_target_job_supervision import target
 from tools.environments.filesystem_authority import FilesystemAuthority
 from tools.environments.filesystem_authority_server import AuthorityServer
@@ -29,7 +29,12 @@ from tools.environments.systemd_jobs import SystemdJobSupervisor
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("backend", ["local", "ssh"])
 async def test_two_gateways_park_before_tools_and_keep_key_rotation_identity(tmp_path, monkeypatch, target, backend):
+    from gateway.platforms.api_server_execution_context import capture_execution_context, ExecutionContextError
+    from gateway.platforms.api_server_filesystem_ownership import ownership_supervisor
+    from gateway.platforms.api_server_job_lifetime import create_job_lifetime, supervision_record
+    from hermes_constants import hermes_home_key
     from model_tools import handle_function_call
+    from tools.environments.job_supervision import SupervisionError
 
     state, root = tmp_path / "authority", tmp_path / "maintained"
     root.mkdir()
@@ -66,7 +71,8 @@ async def test_two_gateways_park_before_tools_and_keep_key_rotation_identity(tmp
                     }}
                     context = {"version": 1, "backend": backend, "cwd": str(root), "lifetime": "wait_for_jobs",
                                "ownership": {"authority": authority.store.authority_id, "principal": "controller",
-                                             "request": name, "fingerprint": name, "roots": [str(root)]}}
+                                              "request": "shared-wire-request", "fingerprint": "shared-wire-digest",
+                                              "roots": [str(root)]}}
                     if backend == "ssh":
                         ssh = target.ssh_config
                         terminal.update(ssh_host=ssh["host"], ssh_port=ssh["port"], ssh_user=ssh["user"],
@@ -129,7 +135,33 @@ async def test_two_gateways_park_before_tools_and_keep_key_rotation_identity(tmp
                 reserved = await clients[0].post("/v1/filesystem-ownership", headers=headers[0],
                                                  json={"operation": "reserve", "execution_context": contexts[0]})
                 assert reserved.status == 200, await reserved.text()
-                assert (await reserved.json())["state"] == "active"
+                first = await reserved.json()
+                assert first["state"] == "active"
+                # A -> B -> A with identical client ownership identities and
+                # the same Unix controller enrollment must never replay A's grant.
+                other = await clients[1].post("/v1/filesystem-ownership", headers=headers[1],
+                    json={"operation": "reserve", "execution_context": contexts[1]})
+                assert other.status == 200, await other.text()
+                assert (await other.json())["state"] == "pending"
+                for operation in ("status", "stop", "release"):
+                    other = await clients[1].post("/v1/filesystem-ownership", headers=headers[1],
+                        json={"operation": operation, "execution_context": contexts[1]})
+                    assert other.status == 200, await other.text()
+                    assert (await other.json())["claim"] != first["claim"]
+                resumed = await clients[0].post("/v1/filesystem-ownership", headers=headers[0],
+                    json={"operation": "status", "execution_context": contexts[0]})
+                assert resumed.status == 200, await resumed.text()
+                assert await resumed.json() == first
+                with profile_scope(tmp_path / "a"):
+                    admitted_context = capture_execution_context(contexts[0])
+                    record = supervision_record(admitted_context, "recovery-contract")
+                    for recorded_home in (None, hermes_home_key(tmp_path / "b")):
+                        with pytest.raises(SupervisionError, match="recovery identity mismatch"):
+                            create_job_lifetime(admitted_context, {**record, "profile_home": recorded_home})
+                with profile_scope(tmp_path / "b"):
+                    with pytest.raises(ExecutionContextError, match="admitted profile scope"):
+                        ownership_supervisor(admitted_context)
+                contexts[1]["ownership"]["request"] = "b-after-cancel"
                 b = await clients[1].post("/v1/runs", headers=headers[1], json={"input": "work", "execution_context": contexts[1]})
                 assert b.status == 202, await b.text()
                 bid = (await b.json())["run_id"]
@@ -143,6 +175,7 @@ async def test_two_gateways_park_before_tools_and_keep_key_rotation_identity(tmp
                 aid = (await a.json())["run_id"]
                 await asyncio.wait_for(asyncio.gather(*adapters[0]._active_run_tasks.values()), 60)
                 assert called == ["a"]
+                assert adapters[0]._run_statuses[aid]["supervision"]["profile_home"] == hermes_home_key(tmp_path / "a")
                 still_waiting = await clients[1].post("/v1/filesystem-ownership", headers=headers[1],
                                                      json={"operation": "reserve", "execution_context": contexts[1]})
                 assert (await still_waiting.json())["state"] == "pending"
@@ -159,6 +192,11 @@ async def test_two_gateways_park_before_tools_and_keep_key_rotation_identity(tmp
                                                json={"input": "work", "execution_context": contexts[0]})
                 assert replay.status == 202 and (await replay.json())["run_id"] == aid
                 assert called == ["a", "b"]
+                same_claim = await clients[0].post("/v1/filesystem-ownership",
+                    headers={**headers[0], "Authorization": "Bearer rotated"},
+                    json={"operation": "status", "execution_context": contexts[0]})
+                assert same_claim.status == 200, await same_claim.text()
+                assert (await same_claim.json())["claim"] == first["claim"]
             finally:
                 for adapter in adapters:
                     adapter._stopping_run_ids.update(adapter._active_run_tasks)
