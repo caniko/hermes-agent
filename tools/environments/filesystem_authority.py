@@ -168,15 +168,18 @@ class FilesystemAuthority:
                 # collect units, including when its acknowledgement is lost.
                 with self.store.transaction():
                     self.store.db.execute("UPDATE jobs SET exit_code=coalesce(exit_code,?) WHERE id=?",
-                                          (code if code is not None else -15, job.id))
-            codes[job.id] = code if code is not None else -15
+                                          (code, job.id))
+            codes[job.id] = code
         if not pending:
             return codes
         supervisor.stop_jobs(pending)
         # The supervisor fences and proves each target cgroup empty before any
         # ledger row settles; all units share one concurrent grace period.
         with self.store.transaction():
-            self.store.db.executemany("UPDATE jobs SET settled=1 WHERE id=?", ((job.id,) for job in pending))
+            for job in pending:
+                codes[job.id] = codes[job.id] if codes[job.id] is not None else -15
+                self.store.db.execute("UPDATE jobs SET exit_code=coalesce(exit_code,?),settled=1 WHERE id=?",
+                                      (codes[job.id], job.id))
         return codes
 
     def _seal(self, row, *, stop=False):

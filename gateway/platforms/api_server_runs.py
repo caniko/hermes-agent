@@ -734,13 +734,18 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         user_message = message["content"]
         if isinstance(user_message, list):
             if any(not isinstance(part, dict) or (
-                part.get("type") == "text" and not isinstance(part.get("text", ""), str)) for part in user_message):
+                str(part.get("type") or "").strip().lower() in _api_server._TEXT_PART_TYPES
+                and not isinstance(part.get("text"), str)) for part in user_message):
                 return _json_error(_openai_error, "input[-1] content must contain message objects with string text", status=400)
         elif not isinstance(user_message, str):
             return _json_error(_openai_error, "input[-1] content must be a string or an array of message objects", status=400)
     else:
         user_message = ""
-    if not user_message:
+    try:
+        user_message = _api_server._normalize_multimodal_content(user_message)
+    except ValueError as exc:
+        return _api_server._multimodal_validation_error(exc, param="input")
+    if not _api_server._content_has_visible_payload(user_message):
         return _json_error(_openai_error, "No user message found in input", status=400)
     try:
         turn_author = _api_server._request_turn_author(body)
@@ -1280,6 +1285,8 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
     response = web.StreamResponse(status=200, headers=self._sse_headers(request))
 
     async def _write(data: bytes) -> None:
+        if self._check_run_auth(request, permission="status") is not None or not self._request_owns_run(request, run_id):
+            raise ConnectionResetError("Run stream authorization expired or was revoked")
         try:
             async with asyncio.timeout(_RUN_STREAM_WRITE_TIMEOUT):
                 await response.write(data)
