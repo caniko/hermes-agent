@@ -100,10 +100,7 @@ def _spawn(process_registry, *, env, env_type, command, cwd, effective_task_id, 
             raise ValueError("Supervised background jobs currently require pipe mode")
         proc = env._run_bash(f"cd -- {shlex.quote(cwd)} && {command}", login=True,
                              wait_for_descendants=True)
-        return process_registry.adopt_local(
-            proc, command=command, cwd=cwd, task_id=effective_task_id,
-            session_key=session_key, owner_task_id=task_id or effective_task_id,
-            notify_on_complete=False)
+        return process_registry.adopt_local(proc, notify_on_complete=False, **common)
     if env_type == "local":
         return process_registry.spawn_local(
             env_vars=env.env if hasattr(env, 'env') else None, use_pty=effective_pty, **common)

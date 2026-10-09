@@ -265,11 +265,25 @@ def test_terminal_dispatch_keeps_supervised_background_descendants_owned(tmp_pat
             assert result.get("exit_code") == 0, result
             wait_for(started.exists)
             assert not process_registry.get(result["session_id"]).exited
+            persistent_started = data / "persistent-started"
+            persistent_child = f"echo ready > {shlex.quote(str(persistent_started))}; while test ! -e {shlex.quote(str(release))}; do sleep .05; done"
+            persistent_command = f"setsid bash -c {shlex.quote(persistent_child)} </dev/null >/dev/null 2>&1 &"
+            persistent = json.loads(terminal_tool(command=persistent_command, background=True,
+                                                  persist_on_release=True, task_id=task))
+            assert persistent.get("exit_code") == 0, persistent
+            assert persistent["persist_on_release"] is True
+            wait_for(persistent_started.exists)
+            persistent_session = process_registry.get(persistent["session_id"])
+            assert persistent_session.persist_on_release is True
+            assert process_registry.kill_all(task, exclude_ids=frozenset({result["session_id"]}),
+                                              source="agent_close") == 0
+            assert not persistent_session.exited
             supervisor.seal()
             assert not supervisor.settled()
             release.touch()
             wait_for(supervisor.settled)
             wait_for(lambda: process_registry.get(result["session_id"]).exited)
+            wait_for(lambda: persistent_session.exited)
     finally:
         supervisor.stop()
         with install_and_reset_profile_terminal_scope(home):

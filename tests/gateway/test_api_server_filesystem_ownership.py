@@ -117,6 +117,11 @@ async def test_two_gateways_park_before_tools_and_keep_key_rotation_identity(tmp
                     clients.append(client)
                     contexts.append(context)
                     headers.append({"Authorization": f"Bearer {name}", "Idempotency-Key": name})
+                malformed = await clients[0].post("/v1/filesystem-ownership",
+                    headers={**headers[0], "Content-Type": "application/json"}, data="{")
+                assert malformed.status == 400, await malformed.text()
+                assert (await malformed.json())["error"] == "Invalid JSON"
+                assert not authority.store.live()
                 outside = tmp_path / "outside"
                 outside.mkdir()
                 denied_context = {**contexts[0], "ownership": {
