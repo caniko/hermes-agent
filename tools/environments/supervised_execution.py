@@ -24,6 +24,15 @@ class SupervisionBinding:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _sealed: bool = field(default=False, init=False)
 
+    @property
+    def sealed(self) -> bool:
+        with self._lock:
+            return self._sealed
+
+    def seal(self) -> None:
+        with self._lock:
+            self._sealed = True
+
     def submit(self, executor, fn, *args, interrupt=None):
         # Submission and registration share the settlement lock. A fast worker
         # (or its child submission) cannot disappear between the two.

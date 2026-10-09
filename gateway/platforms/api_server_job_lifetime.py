@@ -118,6 +118,7 @@ async def settle_failed_run(run) -> None:
 
 
 async def cleanup_job_payloads(self, run_id, lifetime) -> None:
+    from gateway.platforms.api_server_runs import _run_idempotency_store_for
     from tools.environments.systemd_jobs import SystemdJobSupervisor
 
     if not isinstance(lifetime.supervisor, SystemdJobSupervisor):
@@ -128,10 +129,11 @@ async def cleanup_job_payloads(self, run_id, lifetime) -> None:
     try:
         # _set_run_status logs persistence errors; deletion must instead fail
         # closed and verify the authenticated durable terminal record first.
-        if not self._run_idempotency_store.durable:
+        store = _run_idempotency_store_for(self, run_id)
+        if not store.durable:
             raise RuntimeError("terminal run persistence is not durable")
-        self._run_idempotency_store.update_status(run_id, status)
-        record = self._run_idempotency_store.status_for_run(self._run_owners[run_id], run_id)
+        store.update_status(run_id, status)
+        record = store.status_for_run(self._run_owners[run_id], run_id)
         if record is None or record["status"] != status:
             raise RuntimeError("terminal run persistence is unavailable")
         await asyncio.to_thread(lifetime.supervisor.cleanup_payloads)

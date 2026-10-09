@@ -218,7 +218,14 @@ def _uses_room_run_auth(self, request: "web.Request") -> bool:
 
 def _initialize_run_state(self, *, store_factory) -> None:
     """Initialize adapter-owned durable and live ``/v1/runs`` state."""
+    from hermes_constants import hermes_home_key
+
     self._run_idempotency_store = store_factory()
+    self._run_idempotency_store_home = hermes_home_key()
+    self._run_idempotency_store_factory = store_factory
+    self._run_idempotency_stores = {}
+    self._run_idempotency_store_lock = threading.Lock()
+    self._run_idempotency_run_stores = {}
     self._run_owner_pid = os.getpid()
     try:
         from gateway.status import get_process_start_time
@@ -251,19 +258,39 @@ def _http_routes(self) -> list[tuple[str, str, Any]]:
         ("POST", "/v1/runs/{run_id}/stop", self._handle_stop_run)]
 
 
+def _run_idempotency_store_for(self, run_id: str | None = None):
+    from hermes_constants import hermes_home_key
+
+    # Deferred lifecycle writes retain the admission store even outside the
+    # request's profile scope (shutdown, recovery and job-payload cleanup).
+    if run_id is not None and run_id in self._run_idempotency_run_stores:
+        return self._run_idempotency_run_stores[run_id]
+    home = hermes_home_key()
+    if home == self._run_idempotency_store_home:
+        return self._run_idempotency_store
+    with self._run_idempotency_store_lock:
+        if home not in self._run_idempotency_stores:
+            self._run_idempotency_stores[home] = self._run_idempotency_store_factory(
+                db_path=os.path.join(home, "runs_idempotency.db"))
+        return self._run_idempotency_stores[home]
+
+
 def _idempotency_capabilities(self, *, store_type) -> dict[str, Any]:
     return {
         "supported": True,
-        "durable": self._run_idempotency_store.durable,
+        "durable": _run_idempotency_store_for(self).durable,
         "retention_seconds": store_type.RETENTION_SECONDS}
 
 
 def _close_run_state(self) -> None:
-    try:
-        if getattr(self, "_run_idempotency_store", None) is not None:
-            self._run_idempotency_store.close()
-    except Exception:
-        logger.debug("Failed to close run idempotency store for %s", self.name, exc_info=True)
+    stores = [getattr(self, "_run_idempotency_store", None),
+              *getattr(self, "_run_idempotency_stores", {}).values()]
+    for store in stores:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                logger.debug("Failed to close run idempotency store for %s", self.name, exc_info=True)
 
 
 def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, Any]:
@@ -290,7 +317,7 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, 
             "output", "error", "usage", "pending_steer", "session_id", "shutdown_requested_at"}))
     if run_id in self._run_idempotency_ids and should_persist:
         try:
-            self._run_idempotency_store.update_status(run_id, current)
+            _run_idempotency_store_for(self, run_id).update_status(run_id, current)
         except Exception:
             logger.exception("[api_server] failed to persist idempotent run status %s", run_id)
     return current
@@ -427,13 +454,15 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
     ):
         if run_id in self._run_idempotency_ids:
             scope = self._run_idempotency_scope(request)
-            self._run_idempotency_store.extend_retention(scope, run_id, _room_retention_until(request))
+            _run_idempotency_store_for(self).extend_retention(scope, run_id, _room_retention_until(request))
         return status
     scope = self._run_idempotency_scope(request)
-    record = self._run_idempotency_store.status_for_run(
+    store = _run_idempotency_store_for(self)
+    record = store.status_for_run(
         scope, run_id, retention_until=_room_retention_until(request))
     if record is None:
         return None
+    self._run_idempotency_run_stores[run_id] = store
     status = dict(record["status"])
     if status.get("status") not in TERMINAL_STATUSES and not _owner_alive(
         int(record.get("owner_pid") or 0), int(record.get("owner_started") or 0)):
@@ -443,7 +472,7 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
         if status.get("supervision_ready"):
             status.update(status="stopping", supervision_recovery_required=True,
                           last_event="run.recovering_jobs", error="Gateway restarted; owned jobs are being reconciled.")
-        self._run_idempotency_store.update_status(run_id, status)
+        store.update_status(run_id, status)
     self._run_statuses[run_id] = status
     self._run_idempotency_ids.add(run_id)
     self._run_owners[run_id] = scope
@@ -698,8 +727,19 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         return _json_error(_openai_error, "Missing 'input' field", status=400)
     if isinstance(raw_input, str):
         user_message = raw_input
+    elif isinstance(raw_input, list):
+        message = raw_input[-1]
+        if not isinstance(message, dict) or {"role", "content"} - set(message):
+            return _json_error(_openai_error, "input[-1] must have 'role' and 'content' fields", status=400)
+        user_message = message["content"]
+        if isinstance(user_message, list):
+            if any(not isinstance(part, dict) or (
+                part.get("type") == "text" and not isinstance(part.get("text", ""), str)) for part in user_message):
+                return _json_error(_openai_error, "input[-1] content must contain message objects with string text", status=400)
+        elif not isinstance(user_message, str):
+            return _json_error(_openai_error, "input[-1] content must be a string or an array of message objects", status=400)
     else:
-        user_message = raw_input[-1].get("content", "") if isinstance(raw_input, list) else ""
+        user_message = ""
     if not user_message:
         return _json_error(_openai_error, "No user message found in input", status=400)
     try:
@@ -722,8 +762,9 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         return _json_error(_openai_error, selection_error, status=400)
     # A lost-acceptance replay must resolve even while the original run holds the last
     # concurrency slot; this read reserves nothing (the atomic reserve below closes the race).
+    store = _run_idempotency_store_for(self)
     if idempotency_key:
-        outcome, record = self._run_idempotency_store.lookup(
+        outcome, record = store.lookup(
             idempotency_scope, idempotency_key, idempotency_fingerprint,
             retention_until=_room_retention_until(request))
         if outcome == "conflict" or (outcome == "reused" and record is not None):
@@ -732,7 +773,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         execution_context = capture_execution_context(body["execution_context"]) if "execution_context" in body else None
         if execution_context is not None and room_dispatch is not None:
             raise ExecutionContextError("execution_context cannot be combined with hosted_room_dispatch", status=400)
-        if waits_for_jobs(execution_context) and (not idempotency_key or not self._run_idempotency_store.durable):
+        if waits_for_jobs(execution_context) and (not idempotency_key or not store.durable):
             raise ExecutionContextError("wait_for_jobs requires an Idempotency-Key and durable run storage", status=400)
     except ExecutionContextError as exc:
         return _json_error(_openai_error, str(exc), code="execution_context_mismatch", status=exc.status)
@@ -781,7 +822,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         **({"execution_context": execution_context.requested} if execution_context is not None else {}),
         **({"supervision": supervision_record(execution_context, run_id)} if waits_for_jobs(execution_context) else {}))
     if idempotency_key:
-        outcome, record = self._run_idempotency_store.reserve(
+        outcome, record = store.reserve(
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
             owner_pid=self._run_owner_pid, owner_started=self._run_owner_started,
             retention_until=_room_retention_until(request))
@@ -791,6 +832,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
                 self._run_statuses, self._run_owners)
             return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
         self._run_idempotency_ids.add(run_id)
+        self._run_idempotency_run_stores[run_id] = store
     launch = _RunLaunch(
         self, run_id, q, session_id, gateway_session_key, _declared_selected, user_message,
         conversation_history, session_history_delivery,
@@ -1066,7 +1108,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 # A Stop keeps status=stopping, but still needs recovery of the
                 # supervisor that finished preparing after cancellation arrived.
                 current["supervision_ready"] = True
-                self._run_idempotency_store.update_status(run_id, current)
+                _run_idempotency_store_for(self, run_id).update_status(run_id, current)
                 if run_id in self._stopping_run_ids or run_id in self._shutdown_interrupted_run_ids:
                     await settle_failed_run(run)
                     _finish("cancelled")
@@ -1163,6 +1205,7 @@ def _release_run_owner_if_forgotten(self, run_id: str) -> None:
             self._run_approval_sessions)
     if not any(run_id in table for table in live):
         self._run_owners.pop(run_id, None)
+        self._run_idempotency_run_stores.pop(run_id, None)
 
 
 def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
@@ -1175,7 +1218,7 @@ def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
     # Run state that exists without an owner stamp is an unanswered authorization question, not a run anyone
     # may control — under gateway.multiplex_profiles every served profile holds a valid key, so admitting it
     # would make the boundary allow-all (#93689).
-    return self._run_idempotency_store.owns_run(scope, run_id)
+    return _run_idempotency_store_for(self).owns_run(scope, run_id)
 
 
 def _load_owned_run(self, request, *, _api_server, permission: Optional[str], active_fallback: bool):
@@ -1210,7 +1253,7 @@ async def _handle_get_run(self, request: "web.Request", *, _api_server) -> "web.
 
 async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "web.StreamResponse":
     """GET /v1/runs/{run_id}/events — stream structured agent lifecycle events."""
-    auth_err = self._check_auth(request)
+    auth_err = self._check_run_auth(request, permission="status")
     if auth_err:
         return auth_err
     run_id = request.match_info["run_id"]
@@ -1452,6 +1495,6 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
             _unregister_approval_notify(self._run_approval_sessions.get(run_id))
             _retire_live_run(self, run_id)
     for run_id, status in list(self._run_statuses.items()):
-        if (status.get("status") in {"completed", "failed", "cancelled"}
+        if (status.get("status") in TERMINAL_STATUSES
                 and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL):
             _forget_run(self, run_id, self._run_statuses, self._run_idempotency_ids)

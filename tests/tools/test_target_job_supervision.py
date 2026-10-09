@@ -298,12 +298,25 @@ def test_supervisor_preserves_input_and_treats_lost_control_as_unknown(tmp_path,
         # Submission took effect but its reply was lost: reconnect discovers
         # and controls the original job, without replaying the command.
         from tools.environments.job_supervision import SupervisionError
+        from tools.environments.supervised_execution import SupervisionBinding, bind_job_supervision
+        transmissions = []
         def lose_ack(script, stdin=None):
-            target(script, stdin)
+            if not transmissions:
+                target(script, stdin)
+            transmissions.append(script)
             raise OSError("lost acknowledgement")
         uncertain = SystemdJobSupervisor(lose_ack, supervisor.state_dir)
-        with pytest.raises(SupervisionError):
-            uncertain.start("sleep 300", cwd=str(tmp_path), environment_names=("PATH",))
+        binding = SupervisionBinding(supervisor.state_dir)
+        with bind_job_supervision(binding):
+            with pytest.raises(SupervisionError):
+                uncertain.start("sleep 300", cwd=str(tmp_path), environment_names=("PATH",))
+            assert len(transmissions) == 2  # accepted start, fence never transmitted
+            assert not (tmp_path / "state/fence/sealed").exists()
+            fresh = SystemdJobSupervisor(target, supervisor.state_dir)
+            with pytest.raises(SupervisionError, match="sealed"):
+                fresh.start("touch duplicate-from-fresh-supervisor", cwd=str(tmp_path), environment_names=("PATH",))
+            assert binding.sealed
+            assert not (tmp_path / "duplicate-from-fresh-supervisor").exists()
         recovered_jobs = supervisor.jobs()
         assert len(recovered_jobs) == 2
         assert any(supervisor.inspect(receipt) is JobState.RUNNING for receipt in recovered_jobs)
@@ -314,6 +327,7 @@ def test_supervisor_preserves_input_and_treats_lost_control_as_unknown(tmp_path,
             uncertain.start("touch duplicate-after-lost-ack", cwd=str(tmp_path), environment_names=("PATH",))
         assert supervisor.jobs() == recovered_jobs
         assert not (tmp_path / "duplicate-after-lost-ack").exists()
+        supervisor.seal()
         assert (tmp_path / "state/fence/sealed").exists()
     finally:
         supervisor.stop()

@@ -209,6 +209,25 @@ def auth_adapter():
 
 class TestStartRun:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("message", [None, 1, "text", {}, {"role": "user"},
+        {"role": "user", "content": None}, {"role": "user", "content": {}},
+        {"role": "user", "content": [None]},
+        {"role": "user", "content": [{"type": "text", "text": None}]}])
+    async def test_malformed_final_input_is_rejected_before_reservation(self, adapter, message):
+        app = _create_runs_app(adapter)
+        with patch.object(adapter, "_create_agent") as create:
+            async with TestClient(TestServer(app)) as cli:
+                response = await cli.post("/v1/runs", json={"input": [message]},
+                                          headers={"Idempotency-Key": "malformed-input"})
+                payload = await response.json()
+        assert response.status == 400
+        assert "error" in payload
+        assert not adapter._run_statuses
+        assert not adapter._run_streams
+        assert not adapter._run_idempotency_ids
+        create.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_room_auth_is_validated_before_body_parse_or_work_reservation(
         self, auth_adapter
     ):
@@ -1109,7 +1128,62 @@ class TestSteerRun:
 # ---------------------------------------------------------------------------
 
 
+class TestHostedRoomRunEvents:
+    @pytest.mark.asyncio
+    async def test_status_grant_streams_only_its_members_run(self, auth_adapter):
+        from types import SimpleNamespace
+        from gateway import hosted_rooms
+        from gateway.hosted_room_peer import decode_room_grant, issue_room_grant
+
+        grants = []
+        for member in ("owner", "other"):
+            grant = issue_room_grant(auth_adapter._room_grant_secret(), grant_id=f"grant-{member}",
+                room_id="room-events", home_install_id="home-events", authority_gateway_id="home-events",
+                authority_epoch=1, member_id=member, target_install_id=hosted_rooms.local_authority_gateway_id(),
+                target_profile="default", permissions=("status",), ttl_seconds=300)
+            claims = decode_room_grant(auth_adapter._room_grant_secret(), grant, permission="status")
+            hosted_rooms.reserve_peer_room(hosted_rooms.default_db_path(), claims=claims,
+                                           expires_at=float(claims["status_expires_at"]))
+            grants.append(grant)
+        run_id = "run_room_events"
+        headers = {"Authorization": f"HermesRoom {grants[0]}"}
+        request = SimpleNamespace(headers=headers, method="GET", path=f"/v1/runs/{run_id}/events")
+        auth_adapter._run_owners[run_id] = auth_adapter._run_idempotency_scope(request)
+        auth_adapter._set_run_status(run_id, "completed")
+        stream = auth_adapter._run_streams[run_id] = _RunStream()
+        stream.put_nowait({"event": "run.completed", "run_id": run_id})
+        stream.put_nowait(None)
+        async with TestClient(TestServer(_create_runs_app(auth_adapter))) as cli:
+            allowed = await cli.get(f"/v1/runs/{run_id}/events", headers=headers)
+            events = await allowed.text()
+            denied = await cli.get(f"/v1/runs/{run_id}/events",
+                                   headers={"Authorization": f"HermesRoom {grants[1]}"})
+            stopped = await cli.post(f"/v1/runs/{run_id}/stop", headers=headers)
+        assert allowed.status == 200
+        assert "run.completed" in events
+        assert denied.status == 404
+        assert stopped.status == 401  # status is not dispatch/stop authority
+
+
 class TestRunLifecycleSweep:
+    @pytest.mark.asyncio
+    async def test_interrupted_receipt_expires_after_hydration(self, adapter):
+        from types import SimpleNamespace
+
+        run_id = "run_expired_interrupted"
+        request = SimpleNamespace(headers={}, method="GET", path=f"/v1/runs/{run_id}")
+        scope = adapter._run_idempotency_scope(request)
+        created = time.time() - adapter._RUN_STATUS_TTL - 1
+        adapter._run_idempotency_store.reserve(scope, "expired", "fingerprint", run_id,
+            {"run_id": run_id, "status": "interrupted", "created_at": created, "updated_at": created})
+        assert adapter._durable_run_status(request, run_id)["status"] == "interrupted"
+        with patch("gateway.platforms.api_server.asyncio.sleep", side_effect=[None, asyncio.CancelledError()]):
+            with pytest.raises(asyncio.CancelledError):
+                await adapter._sweep_orphaned_runs()
+        assert run_id not in adapter._run_statuses
+        assert run_id not in adapter._run_owners
+        assert run_id not in adapter._run_idempotency_ids
+
 
     @pytest.mark.asyncio
     async def test_expired_live_run_drops_transport_but_keeps_control_state(self, adapter):
