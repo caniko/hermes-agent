@@ -13,7 +13,8 @@ and prints them synchronously after pytest diagnostics, before enforcing the
 original exit-status assertion. This prevents VM console-reader cleanup races
 and places complete report frames at the tail of the failed driver log. The
 generated workflow retains those exact bytes in its `build.log`, including
-after failure, for 31 days.
+after failure, for at least 31 days. Uploads request 32 days because provider
+creation and expiry timestamps can shorten a nominal interval by a few seconds.
 
 To recover a completed report from downloaded build evidence:
 
@@ -33,7 +34,7 @@ drift check pins qualified immutable Simit
 `bbfef6f6674d9977d7504a0e9c66be39147d9400`. The
 `Generate native diagnostic CI` PR workflow builds that generator on the hosted
 runner and retains config/workflow files with source and digest bindings. The
-adopted bytes match its independently verified run `37142435456` exactly.
+adopted bytes must match the source-bound hosted generation artifact exactly.
 Hosted proof of automatic failed-build collection is still required; successful
 generation and manual recovery do not qualify the native lifecycle.
 
