@@ -58,6 +58,7 @@ def validate_execution_context(raw) -> None:
 
 def capture_execution_context(raw) -> ExecutionContext:
     from hermes_constants import hermes_home_key
+    from hermes_platform.host import facts
     from tools.terminal_tool import _get_env_config
 
     validate_execution_context(raw)
@@ -66,6 +67,8 @@ def capture_execution_context(raw) -> ExecutionContext:
     config = _get_env_config()
     actual = {"version": 1, "backend": config["env_type"], "cwd": config["cwd"]}
     if "lifetime" in raw:
+        if backend == "local" and facts.os_family() != "linux":
+            raise ExecutionContextError("Local wait_for_jobs requires a Linux execution host", status=400)
         actual["lifetime"] = raw["lifetime"]
         if backend == "ssh" and not config.get("ssh_hermes_home"):
             raise ExecutionContextError("Supervised SSH runs require a configured terminal.ssh_hermes_home")
