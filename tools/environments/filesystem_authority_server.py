@@ -40,6 +40,10 @@ def socket_parent(socket_path):
     path = Path(socket_path)
     if not path.is_absolute() or ".." in path.parts:
         raise PermissionError("authority socket requires an absolute protected path")
+    getuid = getattr(os, "geteuid", None)
+    if getuid is None:
+        raise RuntimeError("filesystem authority sockets require Linux")
+    owner = getuid()
     fd = os.open("/", os.O_PATH | os.O_DIRECTORY)
     try:
         for index, name in enumerate(path.parts[1:-1], 1):
@@ -52,9 +56,9 @@ def socket_parent(socket_path):
             # service-owned next component. The immediate parent is never shared.
             sticky_ancestor = (index < len(path.parts) - 2 and metadata.st_uid == 0
                                and metadata.st_mode & stat.S_ISVTX)
-            if metadata.st_uid not in (0, os.geteuid()) or (writable and not sticky_ancestor):
+            if metadata.st_uid not in (0, owner) or (writable and not sticky_ancestor):
                 raise PermissionError("authority socket ancestry is not protected")
-        return fd, path.name
+        return fd, path.name, owner
     except BaseException:
         os.close(fd)
         raise
@@ -64,10 +68,10 @@ def request(socket_path, message):
     payload = json.dumps(message).encode() + b"\n"
     if len(payload) > MAX_MESSAGE:
         raise ValueError("authority message exceeds limit")
-    fd, name = socket_parent(socket_path)
+    fd, name, owner = socket_parent(socket_path)
     try:
         metadata = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid not in (0, os.geteuid()):
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid not in (0, owner):
             raise PermissionError("authority socket owner is not trusted")
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(40)
@@ -89,7 +93,7 @@ class AuthorityServer(socketserver.ThreadingUnixStreamServer):
     def __init__(self, socket_path, authority, *, replace_existing=False):
         self.authority = authority
         self._slots = threading.BoundedSemaphore(32)
-        self._parent_fd, name = socket_parent(socket_path)
+        self._parent_fd, name, owner = socket_parent(socket_path)
         pinned = f"/proc/self/fd/{self._parent_fd}/{name}"
         try:
             if replace_existing:
@@ -98,7 +102,7 @@ class AuthorityServer(socketserver.ThreadingUnixStreamServer):
                 except FileNotFoundError:
                     pass
                 else:
-                    if metadata.st_uid != os.geteuid() or not stat.S_ISSOCK(metadata.st_mode):
+                    if metadata.st_uid != owner or not stat.S_ISSOCK(metadata.st_mode):
                         raise PermissionError("refusing to replace a foreign control socket")
                     os.unlink(name, dir_fd=self._parent_fd)
             super().__init__(pinned, AuthorityHandler)
