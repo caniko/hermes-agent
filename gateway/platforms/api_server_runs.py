@@ -674,7 +674,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     except Exception:
         return _json_error(_openai_error, "Invalid JSON", status=400)
     if not isinstance(body, dict):
-        return _json_error(_openai_error, "Run request must be a JSON object", status=400)
+        return _json_error(_openai_error, "JSON body must be an object", status=400)
     body, room_error = await self._normalize_room_dispatch(request, body)
     if room_error is not None:
         return room_error
