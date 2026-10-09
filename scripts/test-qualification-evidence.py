@@ -134,25 +134,27 @@ class EvidenceTests(unittest.TestCase):
     def test_artifact_readback_requires_the_full_31_day_lifetime(self):
         source = {"head": "a" * 40, "run_id": 123}
         created = evidence.dt.datetime(2026, 10, 1, tzinfo=evidence.dt.timezone.utc)
+        kinds = ("admission-green", "admission-baseline-red", "readiness", "native-ordinary", "native-high-memory")
         for seconds in (30 * 86400, 31 * 86400 - 1, 31 * 86400, 32 * 86400):
             with self.subTest(seconds=seconds), tempfile.TemporaryDirectory() as location:
-                artifact = {"id": 1, "name": "worker-proof-native", "expired": False,
-                            "created_at": created.isoformat(),
-                            "expires_at": (created + evidence.dt.timedelta(seconds=seconds)).isoformat(),
-                            "digest": "sha256:" + "b" * 64,
-                            "workflow_run": {"head_sha": source["head"]}}
+                artifacts = [{"id": index, "name": f"worker-proof-{kind}-{source['head']}", "expired": False,
+                             "created_at": created.isoformat(),
+                             "expires_at": (created + evidence.dt.timedelta(seconds=seconds)).isoformat(),
+                             "digest": "sha256:" + "b" * 64,
+                             "workflow_run": {"head_sha": source["head"]}} for index, kind in enumerate(kinds)]
                 destination = Path(location) / "retention.json"
                 with patch.object(evidence, "identity", return_value=source), patch.object(
-                    evidence, "api", return_value={"artifacts": [artifact]}
+                    evidence, "api", return_value={"artifacts": artifacts}
                 ):
                     if seconds < 31 * 86400:
                         with self.assertRaisesRegex(RuntimeError, "lifetime"):
-                            evidence.artifacts("worker-proof-", 1, destination)
+                            evidence.artifacts("worker-proof-", 5, destination)
                         self.assertFalse(destination.exists())
                     else:
-                        evidence.artifacts("worker-proof-", 1, destination)
+                        evidence.artifacts("worker-proof-", 5, destination)
                         receipt = json.loads(destination.read_text(encoding="utf-8-sig"))
-                        self.assertEqual(receipt["artifacts"][0]["retention_seconds"], seconds)
+                        self.assertEqual(len(receipt["artifacts"]), 5)
+                        self.assertTrue(all(artifact["retention_seconds"] == seconds for artifact in receipt["artifacts"]))
                         self.assertFalse(receipt["qualified"])
 
 
