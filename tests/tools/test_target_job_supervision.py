@@ -282,6 +282,14 @@ def test_supervisor_preserves_input_and_treats_lost_control_as_unknown(tmp_path,
         recovered_jobs = supervisor.jobs()
         assert len(recovered_jobs) == 2
         assert any(supervisor.inspect(receipt) is JobState.RUNNING for receipt in recovered_jobs)
+        # Even if the fence acknowledgement is also lost, the same turn cannot
+        # retry with a fresh identity. Reconnect retains the original job intent.
+        uncertain.execute = target
+        with pytest.raises(SupervisionError, match="sealed"):
+            uncertain.start("touch duplicate-after-lost-ack", cwd=str(tmp_path), environment_names=("PATH",))
+        assert supervisor.jobs() == recovered_jobs
+        assert not (tmp_path / "duplicate-after-lost-ack").exists()
+        assert (tmp_path / "state/fence/sealed").exists()
     finally:
         supervisor.stop()
 

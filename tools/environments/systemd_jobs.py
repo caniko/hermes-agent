@@ -39,6 +39,7 @@ class SystemdJobSupervisor:
         self.properties = properties
         self.root_identities = root_identities
         self._manager = "--user" if execution_user is None else "--system"
+        self._sealed = False
 
     def _run(self, script: str, stdin: str | None = None) -> str:
         # SSH without PAM may not set the bus variables. Resolve them on the
@@ -82,6 +83,8 @@ class SystemdJobSupervisor:
     def start(self, command: str, *, cwd: str, environment_names: tuple[str, ...],
               stdin: str | None = None, environment: dict[str, str] | None = None,
               job_id: str | None = None) -> JobReceipt:
+        if self._sealed:
+            raise SupervisionError("target supervision is sealed")
         if not posixpath.isabs(cwd) or "\0" in cwd:
             raise ValueError("job cwd must be absolute")
         # Inherited Linux environments can contain Bash-exported function keys,
@@ -169,7 +172,16 @@ class SystemdJobSupervisor:
                 + '"$2" --noprofile --norc -ec "$3" job "$2" "${CREDENTIALS_DIRECTORY:-}" "$4" "$5" "$6"')
             + f" launcher \"$(command -v env)\" \"$(command -v bash)\" {shlex.quote(launch)} \"$(command -v flock)\" \"$(command -v cmp)\" \"$(command -v stat)\"; "
             f"touch {dest}/accepted")
-        self._run(self._gate(script), stdin)
+        try:
+            self._run(self._gate(script), stdin)
+        except SupervisionError:
+            if job_id is None:
+                # A caller without an immutable admission identity could retry
+                # this tool under a fresh UUID after losing an accepted reply.
+                # Seal locally before the RPC: losing its reply cannot reopen
+                # this turn, while the durable job intent remains reconnectable.
+                self.seal()
+            raise
         return job
 
     def jobs(self) -> list[JobReceipt]:
@@ -316,6 +328,7 @@ class SystemdJobSupervisor:
         return code
 
     def seal(self) -> None:
+        self._sealed = True
         root = shlex.quote(self.state_dir)
         self._run(self._gate(f"test -f {root}/fence/boot; touch {root}/fence/sealed"))
 

@@ -522,6 +522,11 @@ and `systemd-run --expand-environment=no`. The supervisor interface separates
 job ownership from the local/SSH transport so other supervisors can implement the
 same contract.
 
+If a direct supervised tool submission loses its acknowledgement, admission is
+sealed before returning an error: the same run cannot retry under a fresh job
+identity. Its durable job intent remains owned and reconnectable until target
+settlement is proven, even when the sealing acknowledgement is also lost.
+
 Foreground terminal calls return when their shell exits. Background terminal
 completion and the API run remain live while descendants (including detached
 processes with closed output streams) are running. Delegated workers remain owned
