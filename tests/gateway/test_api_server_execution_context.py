@@ -53,6 +53,83 @@ def ssh_target(tmp_path, monkeypatch, backend):
 
 
 @pytest.mark.asyncio
+async def test_idempotency_follows_served_home_across_multiplex_and_standalone_restart(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from gateway.platforms.api_server_runs import _close_run_state, _run_idempotency_store_for
+    from hermes_constants import hermes_home_key
+
+    homes = {name: tmp_path / name for name in ("a", "b")}
+    for home in homes.values():
+        home.mkdir()
+        (home / "config.yaml").write_text(f"terminal:\n  backend: local\n  cwd: {home}\n", encoding="utf-8")
+    with profile_scope(homes["a"]):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "fixture-key"}))
+    executed = []
+    def create_agent(**kwargs):
+        agent = MagicMock()
+        agent.session_id = kwargs["session_id"]
+        def run(**_):
+            executed.append(hermes_home_key())
+            return {"final_response": "done"}
+        agent.run_conversation.side_effect = run
+        return agent
+    monkeypatch.setattr(adapter, "_create_agent", create_agent)
+    @web.middleware
+    async def routed(request, handler):
+        with profile_scope(homes[request.headers["Test-Profile"]]):
+            return await handler(request)
+    app = web.Application(middlewares=[routed])
+    app.router.add_post("/v1/runs", adapter._handle_runs)
+    run_ids = {}
+    headers = {"Authorization": "Bearer fixture-key", "Idempotency-Key": "same-key"}
+    restarted = None
+    try:
+        async with TestClient(TestServer(app)) as client:
+            for name in ("a", "b", "a"):
+                response = await client.post("/v1/runs", headers={**headers, "Test-Profile": name}, json={"input": "work"})
+                assert response.status == 202, await response.text()
+                run_id = (await response.json())["run_id"]
+                if name in run_ids:
+                    assert run_id == run_ids[name]
+                    assert response.headers["Idempotency-Replayed"] == "true"
+                run_ids[name] = run_id
+                await asyncio.wait_for(asyncio.gather(*adapter._active_run_tasks.values()), 10)
+        assert run_ids["a"] != run_ids["b"]
+        assert executed == [hermes_home_key(homes["a"]), hermes_home_key(homes["b"])]
+        with profile_scope(homes["b"]):
+            store = _run_idempotency_store_for(adapter)
+            request = SimpleNamespace(headers=headers, method="GET", path="/v1/runs/run_recovery_b")
+            scope = adapter._run_idempotency_scope(request)
+            store.reserve(scope, "unfinished", "digest", "run_recovery_b", {
+                "run_id": "run_recovery_b", "status": "running", "supervision_ready": True,
+                "execution_context": {"lifetime": "wait_for_jobs"}}, owner_pid=0)
+        _close_run_state(adapter)
+        with profile_scope(homes["b"]):
+            restarted = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "fixture-key"}))
+            app = web.Application()
+            app.router.add_post("/v1/runs", restarted._handle_runs)
+            async with TestClient(TestServer(app)) as client:
+                replay = await client.post("/v1/runs", headers=headers, json={"input": "work"})
+                assert replay.status == 202, await replay.text()
+                assert (await replay.json())["run_id"] == run_ids["b"]
+                assert replay.headers["Idempotency-Replayed"] == "true"
+            recovered = restarted._durable_run_status(request, "run_recovery_b")
+            assert recovered["status"] == "stopping" and recovered["supervision_recovery_required"]
+        # A lifecycle callback under another home must still write B's receipt.
+        with profile_scope(homes["a"]):
+            restarted._set_run_status("run_recovery_b", "interrupted")
+            assert _run_idempotency_store_for(restarted).status_for_run(scope, "run_recovery_b") is None
+        with profile_scope(homes["b"]):
+            assert _run_idempotency_store_for(restarted).status_for_run(scope, "run_recovery_b")["status"]["status"] == "interrupted"
+        assert all((home / "runs_idempotency.db").is_file() for home in homes.values())
+    finally:
+        if restarted is None:
+            _close_run_state(adapter)
+        else:
+            _close_run_state(restarted)
+
+
+@pytest.mark.asyncio
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("backend", ["local", "ssh"])
 async def test_runs_check_and_pin_the_served_target(tmp_path, monkeypatch, backend, ssh_target):
@@ -277,7 +354,8 @@ async def test_run_remains_owned_until_jobs_settle_and_stop_fences_them(tmp_path
                     if tool != "terminal":
                         from tools.code_kernel_remote import _REMOTE_KERNELS
                         assert not any(run_id in str(part) for key in _REMOTE_KERNELS for part in key)
-                    persisted = adapter._run_idempotency_store.status_for_run(owner, run_id)
+                    from gateway.platforms.api_server_runs import _run_idempotency_store_for
+                    persisted = _run_idempotency_store_for(adapter, run_id).status_for_run(owner, run_id)
                     assert persisted["status"]["status"] == adapter._run_statuses[run_id]["status"]
                     # Terminal persistence permits payload deletion, never deletion
                     # of the durable fence that rejects a delayed target launch.

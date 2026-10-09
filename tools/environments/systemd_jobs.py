@@ -83,7 +83,10 @@ class SystemdJobSupervisor:
     def start(self, command: str, *, cwd: str, environment_names: tuple[str, ...],
               stdin: str | None = None, environment: dict[str, str] | None = None,
               job_id: str | None = None) -> JobReceipt:
-        if self._sealed:
+        from tools.environments.supervised_execution import current_job_supervision
+
+        binding = current_job_supervision()
+        if self._sealed or (binding is not None and binding.sealed):
             raise SupervisionError("target supervision is sealed")
         if not posixpath.isabs(cwd) or "\0" in cwd:
             raise ValueError("job cwd must be absolute")
@@ -176,6 +179,8 @@ class SystemdJobSupervisor:
             self._run(self._gate(script), stdin)
         except SupervisionError:
             if job_id is None:
+                if binding is not None:
+                    binding.seal()
                 # A caller without an immutable admission identity could retry
                 # this tool under a fresh UUID after losing an accepted reply.
                 # Seal locally before the RPC: losing its reply cannot reopen

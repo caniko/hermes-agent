@@ -71,6 +71,7 @@ def ownership_supervisor(context):
 
 async def handle_ownership(adapter, request, *, api):
     from gateway.platforms.api_server_execution_context import bind_execution_context, capture_execution_context
+    from gateway.platforms.api_server_runs import _run_idempotency_store_for
     from tools.environments.filesystem_supervisor import AuthorityRequestRejected, OwnershipPending
     from tools.environments.job_supervision import SupervisionError
 
@@ -86,7 +87,7 @@ async def handle_ownership(adapter, request, *, api):
             raise ExecutionContextError("invalid ownership operation", status=400)
         with adapter._profile_scope(api._api_request_profile.get()):
             context = capture_execution_context(body["execution_context"])
-            if "ownership" not in context.requested or not adapter._run_idempotency_store.durable:
+            if "ownership" not in context.requested or not _run_idempotency_store_for(adapter).durable:
                 raise ExecutionContextError("ownership requires a durable supervised worker", status=400)
             with bind_execution_context(context):
                 supervisor, transport = await asyncio.to_thread(ownership_supervisor, context)

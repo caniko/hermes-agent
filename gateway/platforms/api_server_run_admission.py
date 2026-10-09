@@ -10,7 +10,8 @@ from gateway.platforms.api_server_run_idempotency import request_identity
 
 
 async def stop_admission(adapter, request, *, api) -> web.Response:
-    from gateway.platforms.api_server_runs import _json_error, _replay_or_conflict, _stop_owned_run
+    from gateway.platforms.api_server_runs import (
+        _json_error, _replay_or_conflict, _run_idempotency_store_for, _stop_owned_run)
 
     auth_error = adapter._check_auth(request)
     if auth_error is not None:
@@ -25,7 +26,8 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
         context = body.get("execution_context")
         validate_execution_context(context)
         key, fingerprint = request_identity(body, session_key, request.headers.get("Idempotency-Key", ""))
-        if not key or context.get("lifetime") != "wait_for_jobs" or not adapter._run_idempotency_store.durable:
+        store = _run_idempotency_store_for(adapter)
+        if not key or context.get("lifetime") != "wait_for_jobs" or not store.durable:
             raise ValueError("Stopping an admission requires wait_for_jobs, Idempotency-Key and durable storage")
     except (ValueError, TypeError) as exc:
         return _json_error(api._openai_error, str(exc), code="invalid_run_admission_stop", status=400)
@@ -38,7 +40,7 @@ async def stop_admission(adapter, request, *, api) -> web.Response:
                  "last_event": "run.cancelled", "admission_cancelled": True}
     # Reserve uses the same unique key and transaction as create. A create that
     # was waiting on history/config I/O must observe this tombstone at reserve.
-    outcome, record = adapter._run_idempotency_store.reserve(scope, key, fingerprint, run_id, cancelled)
+    outcome, record = store.reserve(scope, key, fingerprint, run_id, cancelled)
     if outcome == "conflict":
         return _replay_or_conflict(adapter, request, outcome, record, session_key, api._openai_error)
     run_id = record["run_id"]
