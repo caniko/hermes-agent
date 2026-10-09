@@ -78,9 +78,12 @@ async def handle_ownership(adapter, request, *, api):
     auth_error = adapter._check_auth(request)
     if auth_error is not None:
         return auth_error
-    transport = None
     try:
         body = await request.json()
+    except ValueError:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    transport = None
+    try:
         if not isinstance(body, dict) or set(body) != {"operation", "execution_context"}:
             raise ExecutionContextError("ownership requires operation and execution_context", status=400)
         if body["operation"] not in {"reserve", "stop", "release", "status"}:
