@@ -56,7 +56,8 @@ Attempt 1 alone is insufficient: provider history must also show no earlier
 qualification workflow run for this PR/head, even after reopening or moving the
 branch away and back. Missing history cannot establish first-run qualification.
 Nested lifecycle receipts are hashed alongside reports and logs; only the
-top-level self-referential receipt is excluded from its member map. Receipts remain
+top-level self-referential receipt is excluded from its member map. The retention
+readback is retained even when identity, capacity or retention checks fail. Receipts remain
 unqualified until independent exact-source acceptance. Historical failed and
 accepted revisions retain their own disposition. This workflow grants no worker
 enablement, dispatch, composition, recovery execution, or deployment authority.

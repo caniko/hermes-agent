@@ -135,7 +135,7 @@ class EvidenceTests(unittest.TestCase):
         source = {"head": "a" * 40, "run_id": 123}
         created = evidence.dt.datetime(2026, 10, 1, tzinfo=evidence.dt.timezone.utc)
         kinds = ("admission-green", "admission-baseline-red", "readiness", "native-ordinary", "native-high-memory")
-        for seconds in (30 * 86400, 31 * 86400 - 1, 31 * 86400, 32 * 86400):
+        for seconds in (30 * 86400, 31 * 86400 - 1, 31 * 86400, 32 * 86400 - 1, 32 * 86400):
             with self.subTest(seconds=seconds), tempfile.TemporaryDirectory() as location:
                 artifacts = [{"id": index, "name": f"worker-proof-{kind}-{source['head']}", "expired": False,
                              "created_at": created.isoformat(),
@@ -149,13 +149,31 @@ class EvidenceTests(unittest.TestCase):
                     if seconds < 31 * 86400:
                         with self.assertRaisesRegex(RuntimeError, "lifetime"):
                             evidence.artifacts("worker-proof-", 5, destination)
-                        self.assertFalse(destination.exists())
+                        receipt = json.loads(destination.read_text(encoding="utf-8-sig"))
+                        self.assertFalse(receipt["qualified"])
+                        self.assertIn("lifetime", receipt["rejected"][0])
+                        self.assertEqual(receipt["artifacts"][0]["retention_seconds"], seconds)
                     else:
                         evidence.artifacts("worker-proof-", 5, destination)
                         receipt = json.loads(destination.read_text(encoding="utf-8-sig"))
                         self.assertEqual(len(receipt["artifacts"]), 5)
                         self.assertTrue(all(artifact["retention_seconds"] == seconds for artifact in receipt["artifacts"]))
                         self.assertFalse(receipt["qualified"])
+                        self.assertEqual(receipt["rejected"], [])
+
+    def test_missing_artifacts_and_provider_errors_retain_failed_receipts(self):
+        source = {"head": "a" * 40, "run_id": 123}
+        for error in (None, RuntimeError("provider unavailable")):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as location:
+                destination = Path(location) / "retention.json"
+                with patch.object(evidence, "identity", return_value=source), patch.object(
+                    evidence, "api", return_value={"artifacts": []}, side_effect=error
+                ), self.assertRaises(RuntimeError):
+                    evidence.artifacts("worker-proof-", 5, destination)
+                receipt = json.loads(destination.read_text(encoding="utf-8-sig"))
+                self.assertFalse(receipt["qualified"])
+                self.assertEqual(receipt["artifacts"], [])
+                self.assertEqual(len(receipt["rejected"]), 1)
 
 
 if __name__ == "__main__":

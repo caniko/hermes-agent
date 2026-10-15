@@ -32,7 +32,7 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
-from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
+from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES, lookup_replay_response
 
 
 logger = logging.getLogger("gateway.platforms.api_server")
@@ -760,12 +760,12 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         return _json_error(_openai_error, selection_error, status=400)
     # A lost-acceptance replay must resolve even while the original run holds the last
     # concurrency slot; this read reserves nothing (the atomic reserve below closes the race).
-    if idempotency_key:
-        outcome, record = self._run_idempotency_store.lookup(
-            idempotency_scope, idempotency_key, idempotency_fingerprint,
-            retention_until=_room_retention_until(request))
-        if outcome == "conflict" or (outcome == "reused" and record is not None):
-            return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
+    replay = lookup_replay_response(
+        self, request, idempotency_key=idempotency_key, idempotency_scope=idempotency_scope,
+        idempotency_fingerprint=idempotency_fingerprint, gateway_session_key=gateway_session_key,
+        _openai_error=_openai_error)
+    if replay is not None:
+        return replay
     try:
         execution_context = capture_execution_context(body["execution_context"]) if "execution_context" in body else None
         if execution_context is not None and room_dispatch is not None:
@@ -810,6 +810,15 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     session_history_delivery = execution_context is None and not previous_response_id and not conversation_history
     if not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
+    # No await separates the live gate from reservation. A profile can detach
+    # during history I/O; existing keys and stop tombstones must still replay.
+    from gateway.platforms.api_server_executor_admission import executor_admission_response
+    admission_error = executor_admission_response(
+        self, request, api=_api_server, idempotency_key=idempotency_key,
+        idempotency_scope=idempotency_scope, idempotency_fingerprint=idempotency_fingerprint,
+        gateway_session_key=gateway_session_key)
+    if admission_error is not None:
+        return admission_error
     self._run_owners[run_id] = self._run_idempotency_scope(request)
     q = self._run_streams[run_id] = _RunStream()
     created_at = self._run_streams_created[run_id] = time.time()
