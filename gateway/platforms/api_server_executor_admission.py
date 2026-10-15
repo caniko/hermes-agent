@@ -31,16 +31,16 @@ def executor_admission(adapter, *, api):
 
 def executor_admission_response(adapter, request, *, api, idempotency_key,
                                 idempotency_scope, idempotency_fingerprint, gateway_session_key):
-    from gateway.platforms.api_server_runs import _replay_or_conflict, _room_retention_until
+    from gateway.platforms.api_server_runs import _lookup_replay_response
     from gateway.platforms.api_server_room_grants import _json_error
 
     if executor_admission(adapter, api=api)["accepting"]:
         return None
-    if idempotency_key:
-        outcome, record = adapter._run_idempotency_store.lookup(
-            idempotency_scope, idempotency_key, idempotency_fingerprint,
-            retention_until=_room_retention_until(request))
-        if outcome == "conflict" or (outcome == "reused" and record is not None):
-            return _replay_or_conflict(adapter, request, outcome, record, gateway_session_key, api._openai_error)
+    replay = _lookup_replay_response(
+        adapter, request, idempotency_key=idempotency_key, idempotency_scope=idempotency_scope,
+        idempotency_fingerprint=idempotency_fingerprint, gateway_session_key=gateway_session_key,
+        _openai_error=api._openai_error)
+    if replay is not None:
+        return replay
     return _json_error(api._openai_error, "Executor is draining; new runs are disabled",
                        code="executor_draining", status=503)

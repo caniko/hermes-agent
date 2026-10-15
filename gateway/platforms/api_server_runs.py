@@ -550,6 +550,19 @@ def _replay_or_conflict(self, request, outcome, record, gateway_session_key, _op
     return _accepted_response(original_id, status.get("status", "queued"), gateway_session_key, replayed=True)
 
 
+def _lookup_replay_response(self, request, *, idempotency_key, idempotency_scope,
+                            idempotency_fingerprint, gateway_session_key, _openai_error):
+    """Read existing ownership without reserving capacity or accepting new work."""
+    if not idempotency_key:
+        return None
+    outcome, record = self._run_idempotency_store.lookup(
+        idempotency_scope, idempotency_key, idempotency_fingerprint,
+        retention_until=_room_retention_until(request))
+    if outcome == "conflict" or (outcome == "reused" and record is not None):
+        return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
+    return None
+
+
 @dataclass(slots=True)
 class _RunLaunch:
     """State for an admitted run's background task; contextvars are captured here
@@ -760,12 +773,12 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         return _json_error(_openai_error, selection_error, status=400)
     # A lost-acceptance replay must resolve even while the original run holds the last
     # concurrency slot; this read reserves nothing (the atomic reserve below closes the race).
-    if idempotency_key:
-        outcome, record = self._run_idempotency_store.lookup(
-            idempotency_scope, idempotency_key, idempotency_fingerprint,
-            retention_until=_room_retention_until(request))
-        if outcome == "conflict" or (outcome == "reused" and record is not None):
-            return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
+    replay = _lookup_replay_response(
+        self, request, idempotency_key=idempotency_key, idempotency_scope=idempotency_scope,
+        idempotency_fingerprint=idempotency_fingerprint, gateway_session_key=gateway_session_key,
+        _openai_error=_openai_error)
+    if replay is not None:
+        return replay
     try:
         execution_context = capture_execution_context(body["execution_context"]) if "execution_context" in body else None
         if execution_context is not None and room_dispatch is not None:
