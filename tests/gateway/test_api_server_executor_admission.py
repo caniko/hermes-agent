@@ -77,7 +77,8 @@ async def test_configured_gate_fails_closed_and_reports_capacity(tmp_path, monke
             assert response.status == 200
             admission = (await response.json())["features"]["runs_executor_admission"]
             assert admission == {"version": 1, "accepting": False, "available_slots": 1}
-            marker.write_text(json.dumps({"version": 1, "accepting": True}))
+            # PowerShell and Windows editors may prepend a UTF-8 BOM to live policy files.
+            marker.write_text(json.dumps({"version": 1, "accepting": True}), encoding="utf-8-sig")
             with patch.object(adapter, "active_agent_work_count", return_value=1):
                 response = await client.get("/v1/capabilities", headers=headers)
             assert response.status == 200
