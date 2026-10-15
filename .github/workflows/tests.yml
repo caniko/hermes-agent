@@ -20,9 +20,10 @@ on:
 permissions:
   contents: read
 
+# Cancel in-progress runs for the same ref; tagged release runs remain independent.
 concurrency:
-  group: tests-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}
-  cancel-in-progress: false
+  group: tests-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   test:

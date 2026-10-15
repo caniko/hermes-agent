@@ -35,8 +35,8 @@ jobs:
         mode: [green, baseline-red]
     env:
       GH_TOKEN: ${{ github.token }}
-      HERMES_TEST_FILE_RETRIES: "0"
-      HERMES_TEST_WORKERS: "1"
+      HERMES_TEST_FILE_RETRIES: '0'
+      HERMES_TEST_WORKERS: '1'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -99,6 +99,8 @@ jobs:
         with:
           name: worker-proof-admission-${{ matrix.mode }}-${{ github.event.pull_request.head.sha }}
           path: ${{ runner.temp }}/qualification/
+          # Provider creation/expiry timestamps can differ by a second. Request
+          # a spare day; the actual-retention gate still requires all 31 days.
           retention-days: 32
           if-no-files-found: error
 

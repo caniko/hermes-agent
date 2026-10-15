@@ -12,6 +12,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 MIN_RETENTION_SECONDS = 31 * 24 * 60 * 60
+REQUESTED_RETENTION_DAYS = 32
 
 
 def require(condition, message):
@@ -39,15 +40,40 @@ def identity():
     head = pr["head"]["sha"]
     require(api(f"pulls/{pr['number']}")["head"]["sha"] == head, "PR head advanced; evidence is historical")
     require(int(os.environ["GITHUB_RUN_ATTEMPT"]) == 1, "Retries cannot qualify; publish a source successor")
+    run_id = int(os.environ["GITHUB_RUN_ID"])
+    run = api(f"actions/runs/{run_id}")
+    require(run["head_sha"] == head and run["event"] == "pull_request" and run["run_attempt"] == 1
+            and any(item["number"] == pr["number"] for item in run["pull_requests"]),
+            "Provider run identity does not match the original PR attempt")
+    page = 1
+    observed = False
+    while True:
+        require(page <= 10, "Provider history exceeds the supported 1000-run pagination bound")
+        response = api(f"actions/workflows/{run['workflow_id']}/runs?head_sha={head}"
+                       f"&event=pull_request&per_page=100&page={page}")
+        require(response["total_count"] <= 1000, "Too much same-head history to establish the first run")
+        for prior in response["workflow_runs"]:
+            if prior["id"] == run_id:
+                observed = True
+            if prior["run_number"] >= run["run_number"]:
+                continue
+            require(prior["pull_requests"], "Earlier run PR identity is absent; first run is unproven")
+            require(not any(item["number"] == pr["number"] for item in prior["pull_requests"]),
+                    f"Earlier qualification run {prior['id']} used this PR/head; publish a source successor")
+        if len(response["workflow_runs"]) < 100 or page * 100 >= response["total_count"]:
+            break
+        page += 1
+    require(observed, "Current qualification run is missing from provider history")
     return {"repository": os.environ["GITHUB_REPOSITORY"], "pr": pr["number"], "head": head,
             "base": pr["base"]["sha"], "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
-            "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"], "run_id": int(os.environ["GITHUB_RUN_ID"]),
-            "run_attempt": 1}
+            "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"], "run_id": run_id,
+            "workflow_id": run["workflow_id"], "run_number": run["run_number"], "run_attempt": 1}
 
 
 def initialize(directory):
     require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "Only GitHub-hosted runners qualify")
-    require(int(os.environ["GITHUB_RETENTION_DAYS"]) >= 31, "Repository/organization retention must allow 31 days")
+    require(int(os.environ["GITHUB_RETENTION_DAYS"]) >= REQUESTED_RETENTION_DAYS,
+            f"Repository/organization retention must allow {REQUESTED_RETENTION_DAYS} days")
     source = identity()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, encoding="utf-8", timeout=30).strip()
     require(revision == source["head"], "Checkout is not the exact PR head")
@@ -88,7 +114,7 @@ def seal(directory, outcome, strict_reports):
     receipt = {"schema": "hosted-qualification.v1", **source, "outcome": outcome,
                 "qualified": False, "reports": reports, "rejected": rejected,
                "members": {str(path.relative_to(directory)): sha256(path)
-                           for path in sorted(directory.rglob("*")) if path.is_file() and path.name != "receipt.json"}}
+                            for path in sorted(directory.rglob("*")) if path.is_file() and path != directory / "receipt.json"}}
     (directory / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     require(not rejected, "; ".join(rejected))
 
@@ -98,6 +124,12 @@ def artifacts(prefix, count, destination):
                "artifacts": [], "rejected": []}
     try:
         receipt.update(identity())
+        required_names = {
+            "worker-proof-": {f"worker-proof-{kind}-{receipt['head']}" for kind in (
+                "admission-green", "admission-baseline-red", "readiness", "native-ordinary", "native-high-memory")},
+            "worker-retention-": {f"worker-retention-{receipt['head']}"},
+        }
+        require(prefix in required_names and count == len(required_names[prefix]), "Unknown artifact identity contract")
         page = 1
         while True:
             response = api(f"actions/runs/{receipt['run_id']}/artifacts?per_page=100&page={page}")
@@ -123,6 +155,8 @@ def artifacts(prefix, count, destination):
             page += 1
         require(len(receipt["artifacts"]) == count,
                 f"Expected {count} required artifacts, found {len(receipt['artifacts'])}")
+        require({artifact["name"] for artifact in receipt["artifacts"]} == required_names[prefix],
+                "Required artifact identities do not match this source")
     except Exception as error:
         receipt["rejected"].append(f"{type(error).__name__}: {error}")
         raise

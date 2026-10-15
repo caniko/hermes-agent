@@ -653,6 +653,12 @@ was lost or the create request has not arrived. It requires durable run storage
 and supports ordinary runs as well as `wait_for_jobs` runs. Capability discovery
 advertises these contracts under `features.runs_recovery`.
 
+Send the body without compression (`Content-Encoding` absent or `identity`).
+Other content encodings are rejected before reservation. The authenticated
+`admission.body_sha256` hashes the original body bytes before charset decoding;
+`admission.key_sha256` hashes the normalized idempotency key. Replays can use a
+different JSON representation but receive a digest of the bytes actually sent.
+
 Unsettled runs, recovery plans, and stop obligations survive transport expiry
 and retention sweeps. Store upgrades add the stop table without replacing
 existing run, event, or approval rows. Before rolling back to a version without
