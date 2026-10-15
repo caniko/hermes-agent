@@ -32,6 +32,22 @@ def request_identity(body, session_key, raw_key: str) -> tuple[str, str]:
     ).encode()).hexdigest() if key else ""
     return key, fingerprint
 
+
+def lookup_replay_response(self, request, *, idempotency_key, idempotency_scope,
+                           idempotency_fingerprint, gateway_session_key, _openai_error):
+    """Read existing ownership without reserving capacity or accepting new work."""
+    from gateway.platforms.api_server_runs import _replay_or_conflict, _room_retention_until
+
+    if not idempotency_key:
+        return None
+    outcome, record = self._run_idempotency_store.lookup(
+        idempotency_scope, idempotency_key, idempotency_fingerprint,
+        retention_until=_room_retention_until(request))
+    if outcome == "conflict" or (outcome == "reused" and record is not None):
+        return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
+    return None
+
+
 _SELECT_BY_KEY = (
     "SELECT fingerprint, run_id, status_json, owner_pid, owner_started, updated_at "
     "FROM run_idempotency WHERE scope=? AND idempotency_key=?")
